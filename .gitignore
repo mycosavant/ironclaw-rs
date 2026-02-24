@@ -19,3 +19,5 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# user-specific config files
+.history
