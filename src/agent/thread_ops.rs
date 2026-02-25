@@ -150,6 +150,30 @@ impl Agent {
             }
         }
 
+        // Quarantine circuit breaker: if the thread has accumulated consecutive
+        // High+ injection turns, hold all tool calls until the user explicitly lifts.
+        {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            if thread.injection_counter.is_quarantined() {
+                // Let the user exit quarantine with the exact command phrase.
+                if thread.injection_counter.try_exit(content) {
+                    tracing::info!(thread_id = %thread_id, "Quarantine lifted by user");
+                    return Ok(SubmissionResult::response(
+                        "Quarantine lifted. Tool calls are re-enabled.".to_string(),
+                    ));
+                }
+                // Otherwise repeat the canned notice — no agentic processing.
+                return Ok(SubmissionResult::response(
+                    crate::agent::quarantine::QUARANTINE_NOTICE.to_string(),
+                ));
+            }
+        }
+
         // Safety validation for user input
         let validation = self.safety().validate_input(content);
         if !validation.is_valid {
@@ -248,6 +272,8 @@ impl Agent {
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            // Begin tracking injection warnings for this turn.
+            thread.injection_counter.begin_turn();
             thread.start_turn(content);
             thread.messages()
         };
@@ -292,7 +318,7 @@ impl Agent {
 
         // Complete, fail, or request approval
         match result {
-            Ok(AgenticLoopResult::Response(response)) => {
+            Ok(AgenticLoopResult::Response { text: response, had_high_severity }) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -314,6 +340,18 @@ impl Agent {
                     }
                 };
 
+                // Update the injection circuit breaker and append a warning
+                // if quarantine was just triggered for the first time.
+                let quarantine_triggered = {
+                    let had = had_high_severity;
+                    if had {
+                        thread.injection_counter.record_warning_severity(
+                            &crate::safety::Severity::High,
+                        );
+                    }
+                    thread.injection_counter.end_turn()
+                };
+
                 thread.complete_turn(&response);
                 let _ = self
                     .channels
@@ -327,6 +365,21 @@ impl Agent {
                 // Persist assistant response (user message already persisted at turn start)
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
+
+                if quarantine_triggered {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        "Injection circuit breaker triggered: entering quarantine"
+                    );
+                    // Append the quarantine notice after the normal response so the user
+                    // sees both the completed turn and the safety escalation.
+                    let notice = format!(
+                        "{}\n\n---\n{}",
+                        response,
+                        crate::agent::quarantine::QUARANTINE_NOTICE
+                    );
+                    return Ok(SubmissionResult::response(notice));
+                }
 
                 Ok(SubmissionResult::response(response))
             }
@@ -617,6 +670,9 @@ impl Agent {
         }
 
         if approved {
+            // Tracks High+ injection warnings from tool outputs in this approval turn.
+            let mut had_high_approval = false;
+
             // If always, add to auto-approved set
             if always {
                 let mut sess = session.lock().await;
@@ -727,6 +783,12 @@ impl Agent {
                     let sanitized = self
                         .safety()
                         .sanitize_tool_output(&pending.tool_name, &output);
+                    // Circuit breaker: track High+ warnings.
+                    for w in &sanitized.warnings {
+                        if w.severity >= crate::safety::Severity::High {
+                            had_high_approval = true;
+                        }
+                    }
                     self.safety().wrap_for_llm(
                         &pending.tool_name,
                         &sanitized.content,
@@ -967,6 +1029,12 @@ impl Agent {
                 let deferred_content = match deferred_result {
                     Ok(output) => {
                         let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        // Circuit breaker: track High+ warnings.
+                        for w in &sanitized.warnings {
+                            if w.severity >= crate::safety::Severity::High {
+                                had_high_approval = true;
+                            }
+                        }
                         self.safety().wrap_for_llm(
                             &tc.name,
                             &sanitized.content,
@@ -1038,7 +1106,19 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response { text: response, had_high_severity }) => {
+                    // Update injection circuit breaker (merge warnings from both
+                    // the local approval-tool execution and the agentic loop).
+                    let quarantine_triggered = {
+                        let any_high = had_high_severity || had_high_approval;
+                        if any_high {
+                            thread.injection_counter.record_warning_severity(
+                                &crate::safety::Severity::High,
+                            );
+                        }
+                        thread.injection_counter.end_turn()
+                    };
+
                     thread.complete_turn(&response);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
@@ -1051,6 +1131,20 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+
+                    if quarantine_triggered {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Injection circuit breaker triggered: entering quarantine"
+                        );
+                        let notice = format!(
+                            "{}\n\n---\n{}",
+                            response,
+                            crate::agent::quarantine::QUARANTINE_NOTICE
+                        );
+                        return Ok(SubmissionResult::response(notice));
+                    }
+
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {

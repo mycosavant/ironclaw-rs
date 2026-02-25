@@ -185,6 +185,10 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Prompt injection circuit breaker state.  Skipped during serialization
+    /// so quarantine resets cleanly on process restart.
+    #[serde(skip)]
+    pub injection_counter: crate::agent::quarantine::InjectionCounter,
 }
 
 impl Thread {
@@ -201,6 +205,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            injection_counter: crate::agent::quarantine::InjectionCounter::new(),
         }
     }
 
@@ -217,6 +222,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            injection_counter: crate::agent::quarantine::InjectionCounter::new(),
         }
     }
 

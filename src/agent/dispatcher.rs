@@ -19,7 +19,12 @@ use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
-    Response(String),
+    Response {
+        /// The LLM's text response.
+        text: String,
+        /// True if at least one High+ injection warning fired during this turn.
+        had_high_severity: bool,
+    },
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
@@ -126,6 +131,8 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+        // Track whether any High+ injection warning fired during this turn.
+        let mut had_high_severity = false;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -234,7 +241,7 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response(text));
+                    return Ok(AgenticLoopResult::Response { text, had_high_severity });
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -589,6 +596,12 @@ impl Agent {
                                     Ok(output) => {
                                         let sanitized =
                                             self.safety().sanitize_tool_output(&tc.name, &output);
+                                        // Track High+ injection warnings for circuit breaker.
+                                        for w in &sanitized.warnings {
+                                            if w.severity >= crate::safety::Severity::High {
+                                                had_high_severity = true;
+                                            }
+                                        }
                                         self.safety().wrap_for_llm(
                                             &tc.name,
                                             &sanitized.content,
@@ -609,7 +622,7 @@ impl Agent {
 
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
-                        return Ok(AgenticLoopResult::Response(instructions));
+                        return Ok(AgenticLoopResult::Response { text: instructions, had_high_severity });
                     }
 
                     // Handle approval if a tool needed it
