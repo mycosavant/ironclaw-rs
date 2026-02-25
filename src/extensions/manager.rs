@@ -32,6 +32,7 @@ use crate::tools::mcp::auth::{
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
+use crate::tools::wasm::signature::{DownloadVerification, TrustedKeyStore};
 
 /// Pending OAuth authorization state.
 struct PendingAuth {
@@ -207,7 +208,7 @@ impl ExtensionManager {
                 ExtensionKind::McpServer => self.install_mcp_from_url(name, url).await,
                 ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
                 ExtensionKind::WasmChannel => {
-                    self.install_wasm_channel_from_url(name, url, None).await
+                    self.install_wasm_channel_from_url(name, url, None, None).await
                 }
             }
             .map_err(|e| {
@@ -563,11 +564,13 @@ impl ExtensionManager {
                 ExtensionSource::WasmDownload {
                     wasm_url,
                     capabilities_url,
+                    verification,
                 } => {
                     self.install_wasm_tool_from_url_with_caps(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
+                        verification.clone(),
                     )
                     .await
                 }
@@ -593,11 +596,13 @@ impl ExtensionManager {
                 ExtensionSource::WasmDownload {
                     wasm_url,
                     capabilities_url,
+                    verification,
                 } => {
                     self.install_wasm_channel_from_url(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
+                        verification.clone(),
                     )
                     .await
                 }
@@ -658,7 +663,7 @@ impl ExtensionManager {
         name: &str,
         url: &str,
     ) -> Result<InstallResult, ExtensionError> {
-        self.install_wasm_tool_from_url_with_caps(name, url, None)
+        self.install_wasm_tool_from_url_with_caps(name, url, None, None)
             .await
     }
 
@@ -667,8 +672,9 @@ impl ExtensionManager {
         name: &str,
         url: &str,
         capabilities_url: Option<&str>,
+        verification: Option<DownloadVerification>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir)
+        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir, verification.as_ref())
             .await?;
 
         Ok(InstallResult {
@@ -683,8 +689,9 @@ impl ExtensionManager {
         name: &str,
         url: &str,
         capabilities_url: Option<&str>,
+        verification: Option<DownloadVerification>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_channels_dir)
+        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_channels_dir, verification.as_ref())
             .await?;
 
         Ok(InstallResult {
@@ -701,12 +708,17 @@ impl ExtensionManager {
     ///
     /// Handles both tar.gz bundles (containing `.wasm` + `.capabilities.json`) and bare
     /// `.wasm` files. Validates HTTPS, size limits, and file format.
+    ///
+    /// If `verification` is provided, the downloaded bytes are verified against the declared
+    /// SHA-256 hash and (if a signature is present) the Ed25519 signature is validated
+    /// against the local trusted key store (`~/.ironclaw/trusted_keys/`).
     async fn download_and_install_wasm(
         &self,
         name: &str,
         url: &str,
         capabilities_url: Option<&str>,
         target_dir: &std::path::Path,
+        verification: Option<&DownloadVerification>,
     ) -> Result<(), ExtensionError> {
         // Require HTTPS to prevent downgrade attacks
         if !url.starts_with("https://") {
@@ -765,6 +777,47 @@ impl ExtensionManager {
                 bytes.len(),
                 MAX_DOWNLOAD_SIZE
             )));
+        }
+
+        // Verify SHA-256 hash and Ed25519 signature before writing anything to disk.
+        // A hash mismatch or invalid signature aborts the install immediately.
+        if let Some(verif) = verification {
+            // Step 1: SHA-256 integrity check
+            verif.verify_hash(&bytes).map_err(|e| {
+                tracing::error!(
+                    extension = %name,
+                    error = %e,
+                    "WASM download failed integrity check"
+                );
+                ExtensionError::InstallFailed(format!("Integrity check failed for '{}': {}", name, e))
+            })?;
+
+            tracing::debug!(extension = %name, "SHA-256 hash verified");
+
+            // Step 2: Ed25519 signature check (only if signing info is present)
+            if verif.signed_manifest.is_some() {
+                // Load trusted keys from the user's local key store
+                let trusted_keys_dir = dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join(".ironclaw")
+                    .join("trusted_keys");
+                let key_store = TrustedKeyStore::from_dir(&trusted_keys_dir).await;
+                let key_store = key_store.unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "Could not load trusted key store; treating as empty");
+                    TrustedKeyStore::empty()
+                });
+
+                verif.verify_signature(name, &key_store).map_err(|e| {
+                    tracing::error!(
+                        extension = %name,
+                        error = %e,
+                        "WASM signature verification failed"
+                    );
+                    ExtensionError::InstallFailed(format!("Signature verification failed for '{}': {}", name, e))
+                })?;
+
+                tracing::info!(extension = %name, "Ed25519 signature verified");
+            }
         }
 
         // Ensure target directory exists

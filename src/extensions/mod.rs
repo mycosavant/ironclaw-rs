@@ -79,6 +79,12 @@ pub enum ExtensionSource {
         wasm_url: String,
         #[serde(default)]
         capabilities_url: Option<String>,
+        /// Cryptographic verification metadata (hash + optional signature).
+        /// Populated from the registry manifest; skipped in serialisation since
+        /// `ExtensionSource` is persisted as JSON in database records and we
+        /// don't want to force re-parsing on every startup.
+        #[serde(skip, default)]
+        verification: Option<crate::tools::wasm::signature::DownloadVerification>,
     },
     /// Build from source repository.
     WasmBuildable {

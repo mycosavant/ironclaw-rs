@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+use crate::tools::wasm::signature::DownloadVerification;
 
 /// A single extension manifest loaded from `registry/{tools,channels}/<name>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +100,16 @@ pub struct ArtifactSpec {
     /// Only needed when `url` points to a bare `.wasm` file instead of a bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_url: Option<String>,
+
+    /// Hex-encoded Ed25519 verifying key (32 bytes = 64 hex chars) of the publisher
+    /// who signed this artifact.  Required together with `signature`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_pubkey: Option<String>,
+
+    /// Hex-encoded Ed25519 signature (64 bytes = 128 hex chars) over the message
+    /// `"{name}:{version}:{sha256_hex}"`.  Verified against `publisher_pubkey`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Summary of authentication requirements extracted from capabilities.
@@ -157,9 +168,30 @@ impl ExtensionManifest {
         // Prefer pre-built artifact download when a URL is available
         let source = if let Some(artifact) = self.artifacts.get("wasm32-wasip2") {
             if let Some(ref url) = artifact.url {
+                // Parse verification metadata (hash + optional signature) from manifest.
+                // If parsing fails (e.g. malformed hex), log a warning and proceed without
+                // verification rather than preventing the install UI from rendering.
+                let verification = match DownloadVerification::from_artifact(
+                    &self.version,
+                    artifact.sha256.as_deref(),
+                    artifact.publisher_pubkey.as_deref(),
+                    artifact.signature.as_deref(),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            name = %self.name,
+                            error = %e,
+                            "Could not parse verification metadata from registry manifest; \
+                             verification will be skipped"
+                        );
+                        None
+                    }
+                };
                 ExtensionSource::WasmDownload {
                     wasm_url: url.clone(),
                     capabilities_url: artifact.capabilities_url.clone(),
+                    verification,
                 }
             } else {
                 ExtensionSource::WasmBuildable {

@@ -83,6 +83,7 @@ mod limits;
 mod loader;
 mod rate_limiter;
 mod runtime;
+pub mod signature;
 mod storage;
 mod wrapper;
 
