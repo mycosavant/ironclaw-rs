@@ -50,10 +50,25 @@ fn readable_prefixes_for_trust(trust: SkillTrust) -> Option<&'static [&'static s
 /// Check whether `path` may be read by a skill with the given trust level.
 ///
 /// Returns `Ok(())` if allowed, `Err(NotAuthorized)` otherwise.
+///
+/// # Path traversal prevention
+///
+/// Any path segment equal to `..` is rejected before the prefix check to prevent
+/// traversal attacks such as `"skills/../secrets/key"` from bypassing the allowlist.
+/// This check applies to all trust levels as a defence-in-depth measure.
 fn check_read_path(path: &str, trust: SkillTrust) -> Result<(), ToolError> {
+    // Reject path traversal unconditionally, for every trust level.
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(ToolError::NotAuthorized(format!(
+            "path '{}' contains '..' traversal segments which are not permitted",
+            path,
+        )));
+    }
+
     let Some(prefixes) = readable_prefixes_for_trust(trust) else {
-        return Ok(()); // Trusted — unrestricted
+        return Ok(()); // Trusted — unrestricted (no prefix filter)
     };
+
     let normalized = path.trim_start_matches('/');
     if prefixes.iter().any(|p| normalized.starts_with(p)) {
         Ok(())
@@ -706,6 +721,48 @@ mod policy_tests {
 
         let err = check_read_path("daily/2024-01-01.md", SkillTrust::Installed);
         assert!(matches!(err, Err(ToolError::NotAuthorized(_))));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Path traversal prevention
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn dotdot_traversal_blocked_for_installed_skill() {
+        // "skills/../secrets/key" starts_with "skills/" but must be blocked
+        let err = check_read_path("skills/../secrets/key", SkillTrust::Installed);
+        assert!(
+            matches!(err, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("..")),
+            "expected NotAuthorized with '..' mention, got {:?}", err
+        );
+    }
+
+    #[test]
+    fn dotdot_traversal_blocked_for_trusted_skill() {
+        // ".." is rejected for ALL trust levels as defence-in-depth.
+        let err = check_read_path("context/../../../etc/passwd", SkillTrust::Trusted);
+        assert!(
+            matches!(err, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("..")),
+            "Trusted skills must also be blocked from '..' traversal; got {:?}", err
+        );
+    }
+
+    #[test]
+    fn dotdot_in_middle_blocked_for_installed_skill() {
+        // Various forms of traversal
+        let cases = [
+            "public/../secrets/key",
+            "skills/my-skill/../../secrets",
+            "../outside",
+            "skills/foo/..",
+        ];
+        for path in cases {
+            let err = check_read_path(path, SkillTrust::Installed);
+            assert!(
+                matches!(err, Err(ToolError::NotAuthorized(_))),
+                "path '{}' should be blocked but was allowed", path
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

@@ -86,8 +86,12 @@ impl LibSqlBackend {
         // Passphrase path: HKDF-SHA256
         let hk = Hkdf::<Sha256>::new(None, trimmed.as_bytes());
         let mut okm = [0u8; 32];
-        hk.expand(b"ironclaw-libsql-enc", &mut okm)
-            .expect("HKDF expand with 32-byte output always succeeds");
+        // HKDF-SHA256 expand cannot fail for L=32 (max is 255*32=8160).
+        // If it somehow does, return a zeroed key — the DB open will then fail
+        // with an authentication error rather than a panic.
+        if hk.expand(b"ironclaw-libsql-enc", &mut okm).is_err() {
+            tracing::error!("HKDF expand failed unexpectedly; using zeroed key");
+        }
         okm
     }
 

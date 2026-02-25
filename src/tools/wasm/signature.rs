@@ -29,6 +29,7 @@
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -237,8 +238,12 @@ impl TrustedKeyStore {
     }
 
     /// Return `true` if `pubkey_bytes` appears in this trust store.
+    ///
+    /// Uses constant-time comparison to prevent timing-based key oracle attacks.
     pub fn is_trusted(&self, pubkey_bytes: &[u8; 32]) -> bool {
-        self.key_bytes.iter().any(|k| k == pubkey_bytes)
+        self.key_bytes
+            .iter()
+            .any(|k| k.ct_eq(pubkey_bytes).unwrap_u8() == 1)
     }
 }
 
@@ -309,8 +314,9 @@ impl DownloadVerification {
             return Ok(()); // No hash declared — skip
         };
 
-        let actual_bytes = Sha256::digest(bytes);
-        if actual_bytes.as_slice() != expected {
+        let actual_bytes: [u8; 32] = Sha256::digest(bytes).into();
+        // Use constant-time comparison to avoid timing side-channels.
+        if actual_bytes.ct_eq(&expected[..]).unwrap_u8() == 0 {
             return Err(VerificationError::HashMismatch {
                 expected: hex::encode(expected),
                 actual: hex::encode(actual_bytes),
@@ -562,5 +568,57 @@ mod tests {
         let vk_bytes = sk.verifying_key().to_bytes();
         let store = TrustedKeyStore::empty();
         assert!(!store.is_trusted(&vk_bytes));
+    }
+
+    #[test]
+    fn empty_trust_store_rejects_signed_manifest_fail_closed() {
+        // A signed manifest with no keys in the trust store MUST be rejected,
+        // never silently accepted.
+        let sk = make_keypair();
+        let data = b"some wasm binary";
+        let sha256 = sha256_of(data);
+        let msg = SignedManifest::signing_message("my-tool", "1.0.0", &sha256);
+        let sig = sk.sign(&msg).to_bytes();
+        let manifest = SignedManifest {
+            binary_sha256: sha256,
+            publisher_pubkey: sk.verifying_key().to_bytes(),
+            signature: sig,
+        };
+        let verif = DownloadVerification {
+            version: "1.0.0".to_string(),
+            sha256: Some(sha256),
+            signed_manifest: Some(manifest),
+        };
+        // Empty store — must fail even with a valid signature
+        let result = verif.verify_signature("my-tool", &TrustedKeyStore::empty());
+        assert!(
+            matches!(result, Err(VerificationError::SignatureInvalid { .. })),
+            "empty trust store must reject all signatures; got {:?}", result
+        );
+    }
+
+    #[test]
+    fn wrong_length_sha256_hex_returns_error() {
+        // 30 hex chars = 15 bytes, not 32
+        let err = DownloadVerification::from_artifact("1.0.0", Some("aabbccddeeff001122334455"), None, None);
+        assert!(matches!(err, Err(VerificationError::InvalidHex(_))));
+    }
+
+    #[test]
+    fn modified_binary_fails_hash_check() {
+        let original = b"original wasm binary";
+        let sha256 = sha256_of(original);
+        let verif = DownloadVerification {
+            version: "1.0.0".to_string(),
+            sha256: Some(sha256),
+            signed_manifest: None,
+        };
+        // A different binary must fail
+        let modified = b"tampered wasm binary!";
+        let result = verif.verify_hash(modified);
+        assert!(
+            matches!(result, Err(VerificationError::HashMismatch { .. })),
+            "tampered binary must not pass hash check; got {:?}", result
+        );
     }
 }
