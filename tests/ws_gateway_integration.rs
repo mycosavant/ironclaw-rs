@@ -63,6 +63,7 @@ async fn start_test_server() -> (
         heartbeat_last_tick: None,
         routine_last_tick: None,
         repair_last_tick: None,
+        session_store: ironclaw::channels::web::session_store::new_session_store(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

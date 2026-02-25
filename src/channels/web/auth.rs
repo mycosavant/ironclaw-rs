@@ -9,6 +9,7 @@ use axum::{
 use subtle::ConstantTimeEq;
 
 use crate::channels::web::server::{SSE_TICKET_TTL_SECS, SseTicketStore};
+use crate::channels::web::session_store::{SessionStore, validate_and_touch};
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
@@ -16,6 +17,8 @@ pub struct AuthState {
     pub token: String,
     /// One-time SSE tickets shared with GatewayState.
     pub sse_tickets: SseTicketStore,
+    /// Short-lived session tokens (accepted in place of the master token).
+    pub session_store: SessionStore,
 }
 
 /// Auth middleware that validates bearer token from header or query param.
@@ -31,11 +34,12 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first (constant-time comparison)
+    // Authorization header: master token (constant-time) or valid session token.
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && let Some(token) = value.strip_prefix("Bearer ")
-        && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+        && (bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+            || validate_and_touch(&auth.session_store, token).await.is_some())
     {
         return next.run(request).await;
     }
@@ -47,7 +51,11 @@ pub async fn auth_middleware(
             // or other special characters work correctly when the browser encodes the URL.
             if let Some(raw) = pair.strip_prefix("token=") {
                 let token = urlencoding::decode(raw).unwrap_or(std::borrow::Cow::Borrowed(raw));
-                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
+                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+                    || validate_and_touch(&auth.session_store, token.as_ref())
+                        .await
+                        .is_some()
+                {
                     return next.run(request).await;
                 }
             }
@@ -85,6 +93,7 @@ mod tests {
             sse_tickets: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            session_store: crate::channels::web::session_store::new_session_store(),
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware,
     response::{
         IntoResponse,
@@ -29,6 +29,7 @@ use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::log_layer::LogBroadcaster;
+use crate::channels::web::session_store;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::db::Database;
@@ -185,6 +186,12 @@ pub struct GatewayState {
     pub routine_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
     /// Unix seconds of the last self-repair sweep tick.
     pub repair_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
+    /// Short-lived gateway session store.
+    ///
+    /// Maps opaque session tokens to [`session_store::GatewaySession`] metadata.
+    /// Sessions expire after [`session_store::SESSION_TTL_SECS`] seconds of inactivity
+    /// and at most [`session_store::MAX_GATEWAY_SESSIONS`] are kept concurrently.
+    pub session_store: session_store::SessionStore,
 }
 
 /// Start the gateway HTTP server.
@@ -216,10 +223,18 @@ pub async fn start_server(
     let auth_state = AuthState {
         token: auth_token,
         sse_tickets: state.sse_tickets.clone(),
+        session_store: state.session_store.clone(),
     };
     let protected = Router::new()
         // SSE one-time ticket issuance
         .route("/api/sse/ticket", post(sse_ticket_handler))
+        // Session management (short-lived tokens)
+        .route("/api/auth/session", post(session_create_handler))
+        .route(
+            "/api/auth/session",
+            axum::routing::delete(session_delete_handler),
+        )
+        .route("/api/auth/sessions", get(session_list_handler))
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
@@ -504,6 +519,73 @@ async fn sse_ticket_handler(State(state): State<Arc<GatewayState>>) -> Json<SseT
     Json(SseTicketResponse {
         ticket,
         expires_in: SSE_TICKET_TTL_SECS,
+    })
+}
+
+// --- Session handlers ---
+
+/// `POST /api/auth/session`
+///
+/// Creates a short-lived session token for the authenticated caller.  The
+/// returned `session_token` can be used in place of the master bearer token
+/// for all subsequent API calls.  Sessions expire after
+/// [`session_store::SESSION_TTL_SECS`] seconds of inactivity (24 h) and at
+/// most [`session_store::MAX_GATEWAY_SESSIONS`] sessions are kept alive
+/// concurrently; when the limit is reached the oldest session is evicted.
+async fn session_create_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<SessionCreateResponse> {
+    let (token, session_id) = session_store::create_session(&state.session_store).await;
+    Json(SessionCreateResponse {
+        session_token: token,
+        session_id: session_id.to_string(),
+        expires_in_secs: session_store::SESSION_TTL_SECS,
+    })
+}
+
+/// `DELETE /api/auth/session`
+///
+/// Revokes the session whose token is in the `Authorization: Bearer` header.
+/// If the master bearer token is presented instead of a session token this is
+/// a no-op (the master token cannot be revoked via this endpoint).
+async fn session_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let raw_token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if session_store::revoke_session(&state.session_store, raw_token).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::OK
+    }
+}
+
+/// `GET /api/auth/sessions`
+///
+/// Lists active sessions (IDs and timestamps only — tokens are never returned
+/// after creation).
+async fn session_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<SessionListResponse> {
+    let sessions = session_store::list_sessions(&state.session_store).await;
+    let now = std::time::Instant::now();
+    Json(SessionListResponse {
+        sessions: sessions
+            .into_iter()
+            .map(|(id, created_at, last_used)| SessionListEntry {
+                session_id: id.to_string(),
+                created_secs_ago: now.duration_since(created_at).as_secs(),
+                last_used_secs_ago: now.duration_since(last_used).as_secs(),
+                expires_in_secs: session_store::SESSION_TTL_SECS
+                    .saturating_sub(now.duration_since(last_used).as_secs()),
+            })
+            .collect(),
+        max_sessions: session_store::MAX_GATEWAY_SESSIONS,
     })
 }
 

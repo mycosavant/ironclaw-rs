@@ -18,6 +18,7 @@ pub mod auth;
 pub mod log_layer;
 pub mod openai_compat;
 pub mod server;
+pub mod session_store;
 pub mod sse;
 pub mod types;
 pub mod ws;
@@ -96,6 +97,7 @@ impl GatewayChannel {
             heartbeat_last_tick: None,
             routine_last_tick: None,
             repair_last_tick: None,
+            session_store: session_store::new_session_store(),
         });
 
         Self {
@@ -133,6 +135,7 @@ impl GatewayChannel {
             heartbeat_last_tick: self.state.heartbeat_last_tick.clone(),
             routine_last_tick: self.state.routine_last_tick.clone(),
             repair_last_tick: self.state.repair_last_tick.clone(),
+            session_store: self.state.session_store.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

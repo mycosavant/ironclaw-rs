@@ -737,6 +737,39 @@ pub struct SseTicketResponse {
     pub expires_in: u64,
 }
 
+// --- Auth / Session ---
+
+/// Response to `POST /api/auth/session`.
+#[derive(Debug, Serialize)]
+pub struct SessionCreateResponse {
+    /// Opaque session token — treat as a secret.  Valid for
+    /// [`SESSION_TTL_SECS`](crate::channels::web::session_store::SESSION_TTL_SECS)
+    /// seconds of inactivity.
+    pub session_token: String,
+    /// Stable session identifier (UUID string).  Does not change if the session
+    /// is refreshed; use this to reference the session in `DELETE /api/auth/session`.
+    pub session_id: String,
+    /// Seconds of inactivity remaining before the session expires.
+    pub expires_in_secs: u64,
+}
+
+/// One entry in a session listing.
+#[derive(Debug, Serialize)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    pub created_secs_ago: u64,
+    pub last_used_secs_ago: u64,
+    /// Seconds remaining before inactivity expiry.
+    pub expires_in_secs: u64,
+}
+
+/// Response to `GET /api/auth/sessions`.
+#[derive(Debug, Serialize)]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionListEntry>,
+    pub max_sessions: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

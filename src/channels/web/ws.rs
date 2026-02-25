@@ -497,6 +497,7 @@ mod tests {
             heartbeat_last_tick: None,
             routine_last_tick: None,
             repair_last_tick: None,
+            session_store: crate::channels::web::session_store::new_session_store(),
         }
     }
 }
