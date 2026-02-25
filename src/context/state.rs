@@ -146,6 +146,14 @@ pub struct JobContext {
     /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
     pub extra_env: Arc<HashMap<String, String>>,
+    /// Minimum skill trust level active for this job turn, if skills are running.
+    ///
+    /// Set to the lowest trust level among all active skills before each tool
+    /// execution. Memory tools use this to enforce prefix-based access control:
+    /// `Installed` skills may only read/search in the `skills/` and `public/`
+    /// prefixes and cannot write any memory at all.
+    #[serde(skip)]
+    pub active_skill_trust: Option<crate::skills::SkillTrust>,
 }
 
 impl JobContext {
@@ -183,6 +191,7 @@ impl JobContext {
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
             metadata: serde_json::Value::Null,
+            active_skill_trust: None,
         }
     }
 

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
+use crate::skills::SkillTrust;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
@@ -25,6 +26,72 @@ use crate::workspace::{Workspace, paths};
 /// injection if an attacker tricks the agent into overwriting them.
 const PROTECTED_IDENTITY_FILES: &[&str] =
     &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+
+/// Workspace path prefixes accessible to `Installed`-trust skills (read-only).
+///
+/// Paths outside these are invisible: installed skills cannot list, read, search,
+/// or write them.  The `public/` prefix is reserved for content the owner
+/// explicitly makes visible to third-party skills; `skills/` covers skill-owned
+/// state so skills can manage their own data.
+const INSTALLED_SKILL_READ_PREFIXES: &[&str] = &["skills/", "public/"];
+
+/// Return the readable-prefix restriction for a given skill trust level.
+///
+/// `None` means *unrestricted* (trusted skill, full access).
+/// `Some(prefixes)` means only paths that start with one of the listed prefixes
+/// are readable; all other paths return `NotAuthorized`.
+fn readable_prefixes_for_trust(trust: SkillTrust) -> Option<&'static [&'static str]> {
+    match trust {
+        SkillTrust::Trusted => None,
+        SkillTrust::Installed => Some(INSTALLED_SKILL_READ_PREFIXES),
+    }
+}
+
+/// Check whether `path` may be read by a skill with the given trust level.
+///
+/// Returns `Ok(())` if allowed, `Err(NotAuthorized)` otherwise.
+fn check_read_path(path: &str, trust: SkillTrust) -> Result<(), ToolError> {
+    let Some(prefixes) = readable_prefixes_for_trust(trust) else {
+        return Ok(()); // Trusted — unrestricted
+    };
+    let normalized = path.trim_start_matches('/');
+    if prefixes.iter().any(|p| normalized.starts_with(p)) {
+        Ok(())
+    } else {
+        Err(ToolError::NotAuthorized(format!(
+            "path '{}' is outside the memory prefixes accessible to installed skills \
+             (allowed: {})",
+            path,
+            prefixes.join(", "),
+        )))
+    }
+}
+
+/// Filter tree entries at the workspace root to only those inside allowed prefixes.
+///
+/// Used when an installed skill calls `memory_tree` with an empty path parameter
+/// so the root listing is restricted to `skills/` and `public/` subtrees.
+fn filter_tree_entries_for_installed(entries: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            // Each entry is either a String ("name/" or "name") or an Object
+            // ({"name/": [children]}) from build_tree.  Match on the leading name.
+            let name = match entry {
+                serde_json::Value::String(s) => s.trim_end_matches('/').to_string(),
+                serde_json::Value::Object(m) => m
+                    .keys()
+                    .next()
+                    .map(|k| k.trim_end_matches('/').to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            INSTALLED_SKILL_READ_PREFIXES
+                .iter()
+                .any(|p| p.trim_end_matches('/') == name)
+        })
+        .collect()
+}
 
 /// Tool for searching workspace memory.
 ///
@@ -77,7 +144,7 @@ impl Tool for MemorySearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -95,15 +162,38 @@ impl Tool for MemorySearchTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
+        // Filter results by document path when an installed skill is active.
+        // Installed skills must not learn about the existence or content of paths
+        // outside their allowed prefixes.
+        let (results, filtered_count) =
+            if let Some(trust) = ctx.active_skill_trust
+                && let Some(prefixes) = readable_prefixes_for_trust(trust)
+            {
+                let before = results.len();
+                let filtered: Vec<_> = results
+                    .into_iter()
+                    .filter(|r| {
+                        let p = r.document_path.trim_start_matches('/');
+                        prefixes.iter().any(|prefix| p.starts_with(prefix))
+                    })
+                    .collect();
+                let removed = before - filtered.len();
+                (filtered, removed)
+            } else {
+                (results, 0)
+            };
+
         let output = serde_json::json!({
             "query": query,
             "results": results.iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
                 "document_id": r.document_id.to_string(),
+                "document_path": r.document_path,
                 "is_hybrid_match": r.is_hybrid(),
             })).collect::<Vec<_>>(),
             "result_count": results.len(),
+            "filtered_count": filtered_count,
         });
 
         Ok(ToolOutput::success(output, start.elapsed()))
@@ -169,9 +259,16 @@ impl Tool for MemoryWriteTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+
+        // Installed skills cannot write workspace memory at all.
+        if ctx.active_skill_trust == Some(SkillTrust::Installed) {
+            return Err(ToolError::NotAuthorized(
+                "installed skills cannot write to workspace memory".to_string(),
+            ));
+        }
 
         let content = require_str(&params, "content")?;
 
@@ -329,11 +426,16 @@ impl Tool for MemoryReadTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
         let path = require_str(&params, "path")?;
+
+        // Installed skills may only read paths within their allowed prefixes.
+        if let Some(trust) = ctx.active_skill_trust {
+            check_read_path(path, trust)?;
+        }
 
         let doc = self
             .workspace
@@ -449,7 +551,7 @@ impl Tool for MemoryTreeTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -460,6 +562,25 @@ impl Tool for MemoryTreeTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(1)
             .clamp(1, 10) as usize;
+
+        // For installed skills, enforce prefix restrictions on the tree view.
+        if let Some(trust) = ctx.active_skill_trust
+            && readable_prefixes_for_trust(trust).is_some()
+        {
+            let normalized = path.trim_start_matches('/');
+            if normalized.is_empty() {
+                // Root listing: build the full tree but filter top-level entries
+                // to only expose the allowed prefixes.
+                let full_tree = self.build_tree("", 1, depth).await?;
+                let restricted = filter_tree_entries_for_installed(full_tree);
+                return Ok(ToolOutput::success(
+                    serde_json::Value::Array(restricted),
+                    start.elapsed(),
+                ));
+            }
+            // Non-root: require path to be inside an allowed prefix.
+            check_read_path(normalized, trust)?;
+        }
 
         let tree = self.build_tree(path, 1, depth).await?;
 
@@ -550,5 +671,98 @@ mod tests {
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["depth"].is_object());
         assert_eq!(schema["properties"]["depth"]["default"], 1);
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // check_read_path
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn trusted_skill_reads_any_path() {
+        assert!(check_read_path("context/passwords.md", SkillTrust::Trusted).is_ok());
+        assert!(check_read_path("daily/2024-01-01.md", SkillTrust::Trusted).is_ok());
+        assert!(check_read_path("MEMORY.md", SkillTrust::Trusted).is_ok());
+    }
+
+    #[test]
+    fn installed_skill_reads_allowed_prefixes() {
+        assert!(check_read_path("skills/my-skill/notes.md", SkillTrust::Installed).is_ok());
+        assert!(check_read_path("public/faq.md", SkillTrust::Installed).is_ok());
+        assert!(check_read_path("/skills/leading-slash.md", SkillTrust::Installed).is_ok());
+    }
+
+    #[test]
+    fn installed_skill_denied_outside_allowed_prefixes() {
+        let err = check_read_path("context/passwords.md", SkillTrust::Installed);
+        assert!(matches!(err, Err(ToolError::NotAuthorized(_))));
+
+        let err = check_read_path("MEMORY.md", SkillTrust::Installed);
+        assert!(matches!(err, Err(ToolError::NotAuthorized(_))));
+
+        let err = check_read_path("daily/2024-01-01.md", SkillTrust::Installed);
+        assert!(matches!(err, Err(ToolError::NotAuthorized(_))));
+    }
+
+    // ---------------------------------------------------------------------------
+    // filter_tree_entries_for_installed
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn filter_tree_keeps_only_allowed_dirs() {
+        let entries = vec![
+            serde_json::Value::String("skills/".to_string()),
+            serde_json::Value::String("public/".to_string()),
+            serde_json::Value::String("context/".to_string()),
+            serde_json::Value::String("daily/".to_string()),
+            serde_json::json!({"skills/": ["my-skill/"]}),
+            serde_json::json!({"context/": ["notes.md"]}),
+        ];
+
+        let filtered = filter_tree_entries_for_installed(entries);
+        assert_eq!(filtered.len(), 3); // "skills/", "public/", {"skills/": [...]}
+
+        let names: Vec<String> = filtered
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.trim_end_matches('/').to_string(),
+                serde_json::Value::Object(m) => m
+                    .keys()
+                    .next()
+                    .map(|k| k.trim_end_matches('/').to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            })
+            .collect();
+
+        assert!(names.contains(&"skills".to_string()));
+        assert!(names.contains(&"public".to_string()));
+        assert!(!names.contains(&"context".to_string()));
+        assert!(!names.contains(&"daily".to_string()));
+    }
+
+    #[test]
+    fn filter_tree_empty_input_returns_empty() {
+        assert!(filter_tree_entries_for_installed(vec![]).is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // readable_prefixes_for_trust
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn trusted_has_no_prefix_restriction() {
+        assert!(readable_prefixes_for_trust(SkillTrust::Trusted).is_none());
+    }
+
+    #[test]
+    fn installed_has_prefix_restriction() {
+        let prefixes = readable_prefixes_for_trust(SkillTrust::Installed).unwrap();
+        assert!(prefixes.contains(&"skills/"));
+        assert!(prefixes.contains(&"public/"));
     }
 }

@@ -121,8 +121,12 @@ impl Agent {
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
 
-        // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        // Create a JobContext for tool execution (chat doesn't have a real job).
+        // Propagate the minimum skill trust so memory tools can enforce prefix
+        // access control: installed skills only see skills/ and public/ paths.
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        job_ctx.active_skill_trust = active_skills.iter().map(|s| s.trust).min();
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination

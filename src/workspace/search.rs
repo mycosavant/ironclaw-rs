@@ -81,6 +81,9 @@ impl SearchConfig {
 pub struct SearchResult {
     /// Document ID containing this chunk.
     pub document_id: Uuid,
+    /// Workspace path of the document (e.g. "skills/my-skill.md", "public/faq.md").
+    /// Used for trust-based access control: installed skills only see allowed prefixes.
+    pub document_path: String,
     /// Chunk ID.
     pub chunk_id: Uuid,
     /// Chunk content.
@@ -115,6 +118,8 @@ impl SearchResult {
 pub struct RankedResult {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
+    /// Workspace path of the parent document.
+    pub document_path: String,
     pub content: String,
     pub rank: u32, // 1-based rank
 }
@@ -143,11 +148,12 @@ pub fn reciprocal_rank_fusion(
     // Track scores and metadata for each chunk
     struct ChunkInfo {
         document_id: Uuid,
+        document_path: String,
         content: String,
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
-    }
+}
 
     let mut chunk_scores: HashMap<Uuid, ChunkInfo> = HashMap::new();
 
@@ -162,6 +168,7 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                document_path: result.document_path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: Some(result.rank),
@@ -180,6 +187,7 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                document_path: result.document_path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: None,
@@ -192,6 +200,7 @@ pub fn reciprocal_rank_fusion(
         .into_iter()
         .map(|(chunk_id, info)| SearchResult {
             document_id: info.document_id,
+            document_path: info.document_path,
             chunk_id,
             content: info.content,
             score: info.score,
@@ -235,6 +244,7 @@ mod tests {
         RankedResult {
             chunk_id,
             document_id: doc_id,
+            document_path: String::new(),
             content: format!("content for chunk {}", chunk_id),
             rank,
         }
