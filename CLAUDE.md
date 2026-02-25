@@ -5,12 +5,14 @@
 **IronClaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
 
 ### Core Philosophy
+
 - **User-first security** - Your data stays yours, encrypted and local
 - **Self-expanding** - Build new tools dynamically without vendor dependency
 - **Defense in depth** - Multiple security layers against prompt injection and data exfiltration
 - **Always available** - Multi-channel access with proactive background execution
 
 ### Features
+
 - **Multi-channel input**: TUI (Ratatui), HTTP webhooks, WASM channels (Telegram, Slack), web gateway
 - **Parallel job execution** with state machine and self-repair for stuck jobs
 - **Sandbox execution**: Docker container isolation with network proxy and credential injection
@@ -236,17 +238,20 @@ src/
 When designing new features or systems, always prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
 
 ### Error Handling
+
 - Use `thiserror` for error types in `error.rs`
 - Never use `.unwrap()` or `.expect()` in production code (tests are fine)
 - Map errors with context: `.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
 - Before committing, grep for `.unwrap()` and `.expect(` in changed files to catch violations mechanically
 
 ### Async
+
 - All I/O is async with tokio
 - Use `Arc<T>` for shared state across tasks
 - Use `RwLock` for concurrent read/write access
 
 ### Traits for Extensibility
+
 - `Database` - Add new database backends (must implement all ~60 methods)
 - `Channel` - Add new input sources
 - `Tool` - Add new capabilities
@@ -256,6 +261,7 @@ When designing new features or systems, always prefer generic/extensible archite
 - `NetworkPolicyDecider` - Custom network access policies for sandbox containers
 
 ### Tool Implementation
+
 ```rust
 #[async_trait]
 impl Tool for MyTool {
@@ -284,7 +290,9 @@ impl Tool for MyTool {
 ```
 
 ### State Transitions
+
 Job states follow a defined state machine in `context/state.rs`:
+
 ```
 Pending -> InProgress -> Completed -> Submitted -> Accepted
                      \-> Failed
@@ -309,21 +317,25 @@ Hard-won lessons from code review -- follow these when fixing bugs or addressing
 **Propagate architectural fixes to satellite types:** If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model (e.g., `LibSqlSecretsStore`, `LibSqlWasmToolStore` holding a single `Connection`) must also be updated. Grep for the old type across the codebase.
 
 **Schema translation is more than DDL:** When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
+
 - **Indexes** -- diff `CREATE INDEX` statements between the two schemas
 - **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
 - **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
 
 **Feature flag testing:** When adding feature-gated code, test compilation with each feature in isolation:
+
 ```bash
 cargo check                                          # default features
 cargo check --no-default-features --features libsql  # libsql only
 cargo check --all-features                           # all features
 ```
+
 Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
 
 **Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
 
 **Mechanical verification before committing:** Run these checks on changed files before committing:
+
 - `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
@@ -332,6 +344,7 @@ Dead code behind the wrong `#[cfg]` gate will only show up when building with a 
 ## Configuration
 
 Environment variables (see `.env.example`):
+
 ```bash
 # Database backend (default: postgres)
 DATABASE_BACKEND=postgres               # or "libsql" / "turso"
@@ -426,10 +439,10 @@ IronClaw supports two database backends, selected at compile time via Cargo feat
 
 ### Backends
 
-| Backend | Feature Flag | Default | Use Case |
-|---------|-------------|---------|----------|
-| PostgreSQL | `postgres` (default) | Yes | Production, existing deployments |
-| libSQL/Turso | `libsql` | No | Zero-dependency local mode, edge, Turso cloud |
+| Backend      | Feature Flag         | Default | Use Case                                      |
+| ------------ | -------------------- | ------- | --------------------------------------------- |
+| PostgreSQL   | `postgres` (default) | Yes     | Production, existing deployments              |
+| libSQL/Turso | `libsql`             | No      | Zero-dependency local mode, edge, Turso cloud |
 
 ```bash
 # Build with PostgreSQL only (default)
@@ -445,6 +458,7 @@ cargo build --features "postgres,libsql"
 ### Database Trait
 
 The `Database` trait (`src/db/mod.rs`) defines ~60 async methods covering all persistence:
+
 - Conversations, messages, metadata
 - Jobs, actions, LLM calls, estimation snapshots
 - Sandbox jobs, job events
@@ -459,6 +473,7 @@ Both backends implement this trait. PostgreSQL delegates to the existing `Store`
 **PostgreSQL:** `migrations/V1__initial.sql` (351 lines). Uses pgvector for embeddings, tsvector for FTS, PL/pgSQL functions. Managed by `refinery`.
 
 **libSQL:** `src/db/libsql_migrations.rs` (consolidated schema, ~480 lines). Translates PG types:
+
 - `UUID` -> `TEXT`, `TIMESTAMPTZ` -> `TEXT` (ISO-8601), `JSONB` -> `TEXT`
 - `VECTOR(1536)` -> `F32_BLOB(1536)` with `libsql_vector_idx`
 - `tsvector`/`ts_rank_cd` -> FTS5 virtual table with sync triggers
@@ -467,6 +482,7 @@ Both backends implement this trait. PostgreSQL delegates to the existing `Store`
 **Tables (both backends):**
 
 **Core:**
+
 - `conversations` - Multi-channel conversation tracking
 - `agent_jobs` - Job metadata and status
 - `job_actions` - Event-sourced tool executions
@@ -475,11 +491,13 @@ Both backends implement this trait. PostgreSQL delegates to the existing `Store`
 - `estimation_snapshots` - Learning data
 
 **Workspace/Memory:**
+
 - `memory_documents` - Flexible path-based files (e.g., "context/vision.md", "daily/2024-01-15.md")
 - `memory_chunks` - Chunked content with FTS and vector indexes
 - `heartbeat_state` - Periodic execution tracking
 
 **Other:**
+
 - `routines`, `routine_runs` - Scheduled/reactive execution
 - `settings` - Per-user key-value settings
 - `tool_failures` - Self-repair tracking
@@ -500,12 +518,14 @@ Database configuration: see Configuration section above.
 ## Safety Layer
 
 All external tool output passes through `SafetyLayer`:
+
 1. **Sanitizer** - Detects injection patterns, escapes dangerous content
 2. **Validator** - Checks length, encoding, forbidden patterns
 3. **Policy** - Rules with severity (Critical/High/Medium/Low) and actions (Block/Warn/Review/Sanitize)
 4. **Leak Detector** - Scans for 15+ secret patterns (API keys, tokens, private keys, connection strings) at two points: tool output before it reaches the LLM, and LLM responses before they reach the user. Actions per pattern: Block (reject entirely), Redact (mask the secret), or Warn (flag but allow)
 
 Tool outputs are wrapped before reaching LLM:
+
 ```xml
 <tool_output name="search" sanitized="true">
 [escaped content]
@@ -522,10 +542,10 @@ Skills are SKILL.md files that extend the agent's prompt with domain-specific in
 
 ### Trust Model
 
-| Trust Level | Source | Tool Access |
-|-------------|--------|-------------|
-| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
-| **Installed** | Downloaded from ClawHub registry | Read-only tools only (no shell, file write, HTTP) |
+| Trust Level   | Source                                                      | Tool Access                                       |
+| ------------- | ----------------------------------------------------------- | ------------------------------------------------- |
+| **Trusted**   | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent                  |
+| **Installed** | Downloaded from ClawHub registry                            | Read-only tools only (no shell, file write, HTTP) |
 
 ### SKILL.md Format
 
@@ -546,7 +566,6 @@ metadata:
       bins: [docker, kubectl]
       env: [KUBECONFIG]
 ---
-
 # Deployment Skill
 
 Instructions for the agent when this skill activates...
@@ -562,6 +581,7 @@ Instructions for the agent when this skill activates...
 ### Skill Tools
 
 Four built-in tools for managing skills at runtime:
+
 - **`skill_list`** -- List all discovered skills with trust level and status
 - **`skill_search`** -- Search ClawHub registry for available skills
 - **`skill_install`** -- Download and install a skill from ClawHub
@@ -585,15 +605,16 @@ The `src/sandbox/` module provides Docker-based isolation for job execution with
 
 ### Sandbox Policies
 
-| Policy | Filesystem | Network | Use Case |
-|--------|-----------|---------|----------|
-| **ReadOnly** | Read-only workspace mount | Allowlisted domains only | Analysis, code review |
+| Policy             | Filesystem                 | Network                  | Use Case                    |
+| ------------------ | -------------------------- | ------------------------ | --------------------------- |
+| **ReadOnly**       | Read-only workspace mount  | Allowlisted domains only | Analysis, code review       |
 | **WorkspaceWrite** | Read-write workspace mount | Allowlisted domains only | Code generation, file edits |
-| **FullAccess** | Full filesystem | Unrestricted | Trusted admin tasks |
+| **FullAccess**     | Full filesystem            | Unrestricted             | Trusted admin tasks         |
 
 ### Network Proxy
 
 Containers route all HTTP/HTTPS traffic through a host-side proxy (`src/sandbox/proxy/`):
+
 - **Domain allowlist** -- Only allowlisted domains are reachable (default: package registries, docs sites, GitHub, common APIs)
 - **Credential injection** -- The `CredentialResolver` trait injects auth headers into proxied requests so secrets never enter the container environment
 - **CONNECT tunnel** -- HTTPS traffic uses CONNECT method; the proxy validates the target domain against the allowlist before establishing the tunnel
@@ -608,12 +629,14 @@ Sandbox configuration: see Configuration section above.
 ## Testing
 
 Tests are in `mod tests {}` blocks at the bottom of each file. Run specific module tests:
+
 ```bash
 cargo test safety::sanitizer::tests
 cargo test tools::registry::tests
 ```
 
 Key test patterns:
+
 - Unit tests for pure functions
 - Async tests with `#[tokio::test]`
 - No mocks, prefer real implementations or stubs
@@ -669,11 +692,11 @@ for that module's behavior. When modifying code in a module that has a spec:
 4. **Spec is the tiebreaker**: when code and spec disagree, the spec is correct
    (unless the spec is clearly outdated, in which case fix the spec first)
 
-| Module | Spec File |
-|--------|-----------|
-| `src/setup/` | `src/setup/README.md` |
+| Module           | Spec File                 |
+| ---------------- | ------------------------- |
+| `src/setup/`     | `src/setup/README.md`     |
 | `src/workspace/` | `src/workspace/README.md` |
-| `src/tools/` | `src/tools/README.md` |
+| `src/tools/`     | `src/tools/README.md`     |
 
 ## Workspace & Memory System
 
