@@ -142,9 +142,19 @@ impl AppBuilder {
                                     "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set"
                                 )
                             })?;
-                    LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret()).await?
+                    LibSqlBackend::new_remote_replica(
+                        db_path,
+                        url,
+                        token.expose_secret(),
+                        self.config.database.libsql_encryption_key.as_ref(),
+                    )
+                    .await?
                 } else {
-                    LibSqlBackend::new_local(db_path).await?
+                    LibSqlBackend::new_local(
+                        db_path,
+                        self.config.database.libsql_encryption_key.as_ref(),
+                    )
+                    .await?
                 };
                 backend.run_migrations().await?;
                 tracing::info!("libSQL database connected and migrations applied");

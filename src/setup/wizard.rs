@@ -567,11 +567,11 @@ impl SetupWizard {
         let db_path = Path::new(path);
 
         let backend = if let (Some(url), Some(token)) = (turso_url, turso_token) {
-            LibSqlBackend::new_remote_replica(db_path, url, token)
+            LibSqlBackend::new_remote_replica(db_path, url, token, None)
                 .await
                 .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?
         } else {
-            LibSqlBackend::new_local(db_path)
+            LibSqlBackend::new_local(db_path, None)
                 .await
                 .map_err(|e| SetupError::Database(format!("Failed to open database: {}", e)))?
         };

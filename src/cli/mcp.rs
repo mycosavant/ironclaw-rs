@@ -533,11 +533,16 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
             let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
             })?;
-            LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?
+            LibSqlBackend::new_remote_replica(
+                db_path,
+                url,
+                token.expose_secret(),
+                config.database.libsql_encryption_key.as_ref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
         } else {
-            LibSqlBackend::new_local(db_path)
+            LibSqlBackend::new_local(db_path, config.database.libsql_encryption_key.as_ref())
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?
         };

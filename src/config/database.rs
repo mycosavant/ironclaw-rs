@@ -56,6 +56,13 @@ pub struct DatabaseConfig {
     pub libsql_url: Option<String>,
     /// Turso auth token (required when libsql_url is set).
     pub libsql_auth_token: Option<SecretString>,
+    /// Optional encryption passphrase for the libSQL database file.
+    ///
+    /// When set, the local database is encrypted with AES-256-CBC (SQLCipher).  
+    /// Provide either a raw 64-hex-character key or any passphrase (HKDF-SHA256
+    /// is used to derive the final 32-byte key deterministically).
+    /// Set via `LIBSQL_ENCRYPTION_KEY` environment variable.
+    pub libsql_encryption_key: Option<SecretString>,
 }
 
 impl DatabaseConfig {
@@ -97,6 +104,7 @@ impl DatabaseConfig {
 
         let libsql_url = optional_env("LIBSQL_URL")?;
         let libsql_auth_token = optional_env("LIBSQL_AUTH_TOKEN")?.map(SecretString::from);
+        let libsql_encryption_key = optional_env("LIBSQL_ENCRYPTION_KEY")?.map(SecretString::from);
 
         if libsql_url.is_some() && libsql_auth_token.is_none() {
             return Err(ConfigError::MissingRequired {
@@ -112,6 +120,7 @@ impl DatabaseConfig {
             libsql_path,
             libsql_url,
             libsql_auth_token,
+            libsql_encryption_key,
         })
     }
 

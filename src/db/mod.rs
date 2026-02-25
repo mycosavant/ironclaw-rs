@@ -62,11 +62,16 @@ pub async fn connect_from_config(
                         "LIBSQL_AUTH_TOKEN required when LIBSQL_URL is set".to_string(),
                     )
                 })?;
-                libsql::LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
-                    .await
-                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+                libsql::LibSqlBackend::new_remote_replica(
+                    db_path,
+                    url,
+                    token.expose_secret(),
+                    config.libsql_encryption_key.as_ref(),
+                )
+                .await
+                .map_err(|e| DatabaseError::Pool(e.to_string()))?
             } else {
-                libsql::LibSqlBackend::new_local(db_path)
+                libsql::LibSqlBackend::new_local(db_path, config.libsql_encryption_key.as_ref())
                     .await
                     .map_err(|e| DatabaseError::Pool(e.to_string()))?
             };

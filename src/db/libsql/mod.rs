@@ -19,8 +19,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
+use hkdf::Hkdf;
 use libsql::{Connection, Database as LibSqlDatabase};
 use rust_decimal::Decimal;
+use secrecy::ExposeSecret as _;
+use sha2::Sha256;
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
@@ -56,8 +59,60 @@ pub struct LibSqlBackend {
 }
 
 impl LibSqlBackend {
+    /// Derive a 32-byte AES-256 key from a user-supplied passphrase.
+    ///
+    /// If the input is exactly 64 hex characters it is decoded directly;
+    /// otherwise HKDF-SHA256 is applied so any passphrase length works.
+    fn derive_key(passphrase: &str) -> [u8; 32] {
+        let trimmed = passphrase.trim();
+        // Raw hex key path (64 chars = 32 bytes)
+        if trimmed.len() == 64 {
+            let mut bytes = [0u8; 32];
+            let mut valid = true;
+            for (i, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
+                if let Ok(s) = std::str::from_utf8(chunk)
+                    && let Ok(b) = u8::from_str_radix(s, 16)
+                {
+                    bytes[i] = b;
+                    continue;
+                }
+                valid = false;
+                break;
+            }
+            if valid {
+                return bytes;
+            }
+        }
+        // Passphrase path: HKDF-SHA256
+        let hk = Hkdf::<Sha256>::new(None, trimmed.as_bytes());
+        let mut okm = [0u8; 32];
+        hk.expand(b"ironclaw-libsql-enc", &mut okm)
+            .expect("HKDF expand with 32-byte output always succeeds");
+        okm
+    }
+
+    /// Build an `EncryptionConfig` from an optional passphrase.
+    fn make_encryption_config(
+        key: Option<&secrecy::SecretString>,
+    ) -> Option<libsql::EncryptionConfig> {
+        key.map(|k| {
+            let raw = Self::derive_key(k.expose_secret());
+            libsql::EncryptionConfig::new(
+                libsql::Cipher::Aes256Cbc,
+                bytes::Bytes::copy_from_slice(&raw),
+            )
+        })
+    }
+
     /// Create a new local embedded database.
-    pub async fn new_local(path: &Path) -> Result<Self, DatabaseError> {
+    ///
+    /// If `encryption_key` is `Some`, the database file is encrypted at rest
+    /// using AES-256-CBC (SQLCipher).  The same key must be supplied on every
+    /// subsequent open; opening with a wrong or absent key will fail.
+    pub async fn new_local(
+        path: &Path,
+        encryption_key: Option<&secrecy::SecretString>,
+    ) -> Result<Self, DatabaseError> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -65,7 +120,11 @@ impl LibSqlBackend {
             })?;
         }
 
-        let db = libsql::Builder::new_local(path)
+        let mut builder = libsql::Builder::new_local(path);
+        if let Some(cfg) = Self::make_encryption_config(encryption_key) {
+            builder = builder.encryption_config(cfg);
+        }
+        let db = builder
             .build()
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open libSQL database: {}", e)))?;
@@ -86,10 +145,13 @@ impl LibSqlBackend {
     }
 
     /// Create with Turso cloud sync (embedded replica).
+    ///
+    /// If `encryption_key` is `Some`, the local replica file is encrypted.
     pub async fn new_remote_replica(
         path: &Path,
         url: &str,
         auth_token: &str,
+        encryption_key: Option<&secrecy::SecretString>,
     ) -> Result<Self, DatabaseError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -97,7 +159,15 @@ impl LibSqlBackend {
             })?;
         }
 
-        let db = libsql::Builder::new_remote_replica(path, url.to_string(), auth_token.to_string())
+        let mut builder = libsql::Builder::new_remote_replica(
+            path,
+            url.to_string(),
+            auth_token.to_string(),
+        );
+        if let Some(cfg) = Self::make_encryption_config(encryption_key) {
+            builder = builder.encryption_config(cfg);
+        }
+        let db = builder
             .build()
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open remote replica: {}", e)))?;
@@ -381,6 +451,36 @@ mod tests {
     use crate::db::Database;
     use crate::db::libsql::LibSqlBackend;
 
+    #[test]
+    fn test_derive_key_from_raw_hex() {
+        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let key = LibSqlBackend::derive_key(hex);
+        assert_eq!(key[0], 0x01);
+        assert_eq!(key[31], 0x20);
+    }
+
+    #[test]
+    fn test_derive_key_from_passphrase_is_deterministic() {
+        let k1 = LibSqlBackend::derive_key("my-secret-passphrase!");
+        let k2 = LibSqlBackend::derive_key("my-secret-passphrase!");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_derive_key_different_passphrases_differ() {
+        let k1 = LibSqlBackend::derive_key("passphrase-a");
+        let k2 = LibSqlBackend::derive_key("passphrase-b");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_derive_key_invalid_hex_falls_back_to_hkdf() {
+        // 64 chars but not valid hex → falls back to HKDF rather than panicking
+        let not_valid_hex = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        let k = LibSqlBackend::derive_key(not_valid_hex);
+        assert_eq!(k.len(), 32);
+    }
+
     #[tokio::test]
     async fn test_wal_mode_after_migrations() {
         let backend = LibSqlBackend::new_memory().await.unwrap();
@@ -416,7 +516,7 @@ mod tests {
         // Use a temp file so connections share state (in-memory DBs are connection-local)
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test_concurrent.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path, None).await.unwrap();
         backend.run_migrations().await.unwrap();
 
         // Spawn 20 concurrent inserts into the conversations table

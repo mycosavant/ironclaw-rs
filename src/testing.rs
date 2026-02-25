@@ -42,7 +42,7 @@ pub async fn test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
 
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = dir.path().join("test.db");
-    let backend = LibSqlBackend::new_local(&path)
+    let backend = LibSqlBackend::new_local(&path, None)
         .await
         .expect("failed to create test LibSqlBackend");
     backend
