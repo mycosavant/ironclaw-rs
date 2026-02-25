@@ -59,6 +59,10 @@ async fn start_test_server() -> (
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
+        sse_tickets: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        heartbeat_last_tick: None,
+        routine_last_tick: None,
+        repair_last_tick: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

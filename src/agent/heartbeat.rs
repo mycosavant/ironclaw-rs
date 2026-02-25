@@ -24,6 +24,7 @@
 //! if action is needed.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -104,6 +105,8 @@ pub struct HeartbeatRunner {
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
+    /// Shared atomic updated on each tick for external liveness monitoring.
+    last_tick: Option<Arc<AtomicI64>>,
 }
 
 impl HeartbeatRunner {
@@ -123,12 +126,19 @@ impl HeartbeatRunner {
             safety,
             response_tx: None,
             consecutive_failures: 0,
+            last_tick: None,
         }
     }
 
     /// Set the response channel for notifications.
     pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
         self.response_tx = Some(tx);
+        self
+    }
+
+    /// Set the shared liveness tick atomic.
+    pub fn with_last_tick(mut self, tick: Arc<AtomicI64>) -> Self {
+        self.last_tick = Some(tick);
         self
     }
 
@@ -152,6 +162,15 @@ impl HeartbeatRunner {
 
         loop {
             interval.tick().await;
+
+            // Update external liveness monitor.
+            if let Some(ref a) = self.last_tick {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                a.store(secs, Ordering::Relaxed);
+            }
 
             // Run memory hygiene in the background so it never delays the
             // heartbeat checklist. Failures are logged inside run_if_due.
@@ -354,10 +373,14 @@ pub fn spawn_heartbeat(
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    last_tick: Option<Arc<AtomicI64>>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
+    }
+    if let Some(tick) = last_tick {
+        runner = runner.with_last_tick(tick);
     }
 
     tokio::spawn(async move {

@@ -493,6 +493,10 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            sse_tickets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            heartbeat_last_tick: None,
+            routine_last_tick: None,
+            repair_last_tick: None,
         }
     }
 }

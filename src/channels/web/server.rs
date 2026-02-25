@@ -47,6 +47,16 @@ pub type PromptQueue = Arc<
     >,
 >;
 
+/// One-time SSE authentication ticket store.
+///
+/// Maps 64-char hex ticket → creation `Instant`. Tickets expire after 60 seconds
+/// and are consumed on first use so they cannot be replayed.
+pub type SseTicketStore =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>;
+
+/// TTL for SSE one-time tickets.
+pub const SSE_TICKET_TTL_SECS: u64 = 60;
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -163,6 +173,18 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
+    /// One-time SSE authentication tickets.
+    ///
+    /// The browser UI calls `POST /api/sse/ticket` (with bearer auth) to obtain
+    /// a short-lived ticket, then opens the SSE stream with `?ticket=<hex>`.
+    /// The ticket is consumed on first use and expires after `SSE_TICKET_TTL_SECS`.
+    pub sse_tickets: SseTicketStore,
+    /// Unix seconds of the last heartbeat task tick (0 = never run).
+    pub heartbeat_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
+    /// Unix seconds of the last routine engine cron tick.
+    pub routine_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
+    /// Unix seconds of the last self-repair sweep tick.
+    pub repair_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
 }
 
 /// Start the gateway HTTP server.
@@ -191,8 +213,13 @@ pub async fn start_server(
     let public = Router::new().route("/api/health", get(health_handler));
 
     // Protected routes (require auth)
-    let auth_state = AuthState { token: auth_token };
+    let auth_state = AuthState {
+        token: auth_token,
+        sse_tickets: state.sse_tickets.clone(),
+    };
     let protected = Router::new()
+        // SSE one-time ticket issuance
+        .route("/api/sse/ticket", post(sse_ticket_handler))
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
@@ -422,10 +449,61 @@ async fn favicon_handler() -> impl IntoResponse {
 
 // --- Health ---
 
-async fn health_handler() -> Json<HealthResponse> {
+async fn health_handler(State(state): State<Arc<GatewayState>>) -> Json<HealthResponse> {
+    use std::sync::atomic::Ordering;
+    let heartbeat_last_tick_secs = state
+        .heartbeat_last_tick
+        .as_ref()
+        .map(|a| a.load(Ordering::Relaxed))
+        .filter(|&v| v != 0);
+    let routine_last_tick_secs = state
+        .routine_last_tick
+        .as_ref()
+        .map(|a| a.load(Ordering::Relaxed))
+        .filter(|&v| v != 0);
+    let repair_last_tick_secs = state
+        .repair_last_tick
+        .as_ref()
+        .map(|a| a.load(Ordering::Relaxed))
+        .filter(|&v| v != 0);
+    let uptime_secs = state.startup_time.elapsed().as_secs();
     Json(HealthResponse {
         status: "healthy",
         channel: "gateway",
+        uptime_secs,
+        heartbeat_last_tick_secs,
+        routine_last_tick_secs,
+        repair_last_tick_secs,
+    })
+}
+
+// --- SSE ticket ---
+
+/// Issue a one-time SSE authentication ticket.
+///
+/// The ticket is a 64-char hex string valid for `SSE_TICKET_TTL_SECS` seconds.
+/// It can be used exactly once as `?ticket=<hex>` on the chat events SSE
+/// endpoint, allowing `EventSource` (which cannot set headers) to authenticate
+/// without embedding the long-lived bearer token in a URL.
+async fn sse_ticket_handler(State(state): State<Arc<GatewayState>>) -> Json<SseTicketResponse> {
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let ticket = bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{:02x}", b);
+        s
+    });
+
+    state
+        .sse_tickets
+        .lock()
+        .await
+        .insert(ticket.clone(), std::time::Instant::now());
+
+    Json(SseTicketResponse {
+        ticket,
+        expires_in: SSE_TICKET_TTL_SECS,
     })
 }
 

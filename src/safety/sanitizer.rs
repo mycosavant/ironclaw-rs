@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use aho_corasick::AhoCorasick;
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::safety::Severity;
 
@@ -201,8 +202,18 @@ impl Sanitizer {
     pub fn sanitize(&self, content: &str) -> SanitizedOutput {
         let mut warnings = Vec::new();
 
-        // Detect patterns using Aho-Corasick
-        for mat in self.pattern_matcher.find_iter(content) {
+        // Apply NFKC Unicode normalization before pattern matching.
+        //
+        // NFKC collapses visually similar characters (e.g., full-width "ｅｖａｌ" →
+        // "eval", ligatures "ﬁ" → "fi") so attackers cannot evade Aho-Corasick
+        // matching by substituting lookalike Unicode codepoints.  We run all
+        // detection against the normalized form and surface both the normalized
+        // content and the modification flag to callers.
+        let normalized: String = content.nfkc().collect();
+        let nfkc_modified = normalized != content;
+
+        // Detect patterns using Aho-Corasick (on normalized content)
+        for mat in self.pattern_matcher.find_iter(&normalized) {
             let pattern_info = &self.patterns[mat.pattern().as_usize()];
             warnings.push(InjectionWarning {
                 pattern: pattern_info.pattern.clone(),
@@ -212,9 +223,9 @@ impl Sanitizer {
             });
         }
 
-        // Detect regex patterns
+        // Detect regex patterns (on normalized content)
         for pattern in &self.regex_patterns {
-            for mat in pattern.regex.find_iter(content) {
+            for mat in pattern.regex.find_iter(&normalized) {
                 warnings.push(InjectionWarning {
                     pattern: pattern.name.clone(),
                     severity: pattern.severity,
@@ -231,10 +242,10 @@ impl Sanitizer {
         let has_critical = warnings.iter().any(|w| w.severity == Severity::Critical);
 
         let (content, was_modified) = if has_critical {
-            // For critical issues, escape the entire content
-            (self.escape_content(content), true)
+            // For critical issues, escape the entire normalized content
+            (self.escape_content(&normalized), true)
         } else {
-            (content.to_string(), false)
+            (normalized, nfkc_modified)
         };
 
         SanitizedOutput {
@@ -338,5 +349,30 @@ mod tests {
         // Null bytes should be detected and content modified
         assert!(result.was_modified);
         assert!(!result.content.contains('\x00'));
+    }
+
+    #[test]
+    fn test_nfkc_normalization_catches_lookalikes() {
+        let sanitizer = Sanitizer::new();
+
+        // Full-width "ｅｖａｌ" (U+FF45 U+FF56 U+FF41 U+FF4C) normalizes to "eval"
+        // under NFKC, so the eval detection pattern should fire.
+        let result = sanitizer.sanitize("ｅｖａｌ(import('os'))");
+        assert!(
+            result.warnings.iter().any(|w| w.pattern == "eval_call"),
+            "NFKC-normalised 'ｅｖａｌ(' should trigger eval_call warning"
+        );
+
+        // The output content should be in normalized form.
+        assert!(result.was_modified, "NFKC normalization should set was_modified");
+    }
+
+    #[test]
+    fn test_nfkc_normalization_plain_ascii_unchanged() {
+        let sanitizer = Sanitizer::new();
+        // ASCII-only safe content: NFKC does nothing → was_modified stays false.
+        let result = sanitizer.sanitize("ls -la /tmp");
+        assert!(!result.was_modified);
+        assert_eq!(result.content, "ls -la /tmp");
     }
 }

@@ -714,6 +714,27 @@ pub struct SettingsExportResponse {
 pub struct HealthResponse {
     pub status: &'static str,
     pub channel: &'static str,
+    /// Seconds since the gateway process started.
+    pub uptime_secs: u64,
+    /// Unix epoch seconds of the last heartbeat tick (omitted if heartbeat never ran).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_last_tick_secs: Option<i64>,
+    /// Unix epoch seconds of the last routine engine cron sweep.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine_last_tick_secs: Option<i64>,
+    /// Unix epoch seconds of the last self-repair sweep.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_last_tick_secs: Option<i64>,
+}
+
+// --- SSE ticket ---
+
+#[derive(Debug, Serialize)]
+pub struct SseTicketResponse {
+    /// 64-char hex one-time ticket.
+    pub ticket: String,
+    /// Seconds until the ticket expires.
+    pub expires_in: u64,
 }
 
 #[cfg(test)]

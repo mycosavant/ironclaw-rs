@@ -872,6 +872,9 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            heartbeat_tick: None,
+            routine_tick: None,
+            repair_tick: None,
         };
 
         Agent::new(

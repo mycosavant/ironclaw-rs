@@ -8,6 +8,7 @@
 //! - `thread_ops` - Thread/session operations (user input, undo, approval, persistence)
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use futures::StreamExt;
 
@@ -72,6 +73,13 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// Shared atomic updated on every heartbeat tick (Unix seconds, 0 = never).
+    /// Pass the same Arc to the web gateway for liveness monitoring.
+    pub heartbeat_tick: Option<Arc<AtomicI64>>,
+    /// Shared atomic updated on every routine-engine cron tick.
+    pub routine_tick: Option<Arc<AtomicI64>>,
+    /// Shared atomic updated on every self-repair tick.
+    pub repair_tick: Option<Arc<AtomicI64>>,
 }
 
 /// The main agent that coordinates all components.
@@ -227,9 +235,19 @@ impl Agent {
         ));
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
+        let repair_tick_inner = self.deps.repair_tick.clone();
         let repair_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(repair_interval).await;
+
+                // Update liveness tick.
+                if let Some(ref a) = repair_tick_inner {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    a.store(secs, Ordering::Relaxed);
+                }
 
                 // Check stuck jobs
                 let stuck_jobs = repair.detect_stuck_jobs().await;
@@ -371,6 +389,7 @@ impl Agent {
                         self.cheap_llm().clone(),
                         self.safety().clone(),
                         Some(notify_tx),
+                        self.deps.heartbeat_tick.clone(),
                     ))
                 } else {
                     tracing::warn!("Heartbeat enabled but no workspace available");
@@ -391,14 +410,18 @@ impl Agent {
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(32);
 
-                    let engine = Arc::new(RoutineEngine::new(
+                    let mut engine_inner = RoutineEngine::new(
                         rt_config.clone(),
                         Arc::clone(store),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
-                    ));
+                    );
+                    if let Some(ref tick) = self.deps.routine_tick {
+                        engine_inner = engine_inner.with_last_tick(tick.clone());
+                    }
+                    let engine = Arc::new(engine_inner);
 
                     // Register routine tools
                     self.deps

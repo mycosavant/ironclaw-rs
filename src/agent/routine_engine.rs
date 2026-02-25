@@ -11,7 +11,7 @@
 //! Full-job routines are delegated to the existing `Scheduler`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -44,6 +44,8 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Shared atomic updated on each cron tick for external liveness monitoring.
+    last_tick: Option<Arc<AtomicI64>>,
 }
 
 impl RoutineEngine {
@@ -64,7 +66,14 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            last_tick: None,
         }
+    }
+
+    /// Set the shared liveness tick atomic (updated on each cron sweep).
+    pub fn with_last_tick(mut self, tick: Arc<AtomicI64>) -> Self {
+        self.last_tick = Some(tick);
+        self
     }
 
     /// Refresh the in-memory event trigger cache from DB.
@@ -147,6 +156,15 @@ impl RoutineEngine {
 
     /// Check all due cron routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
+        // Update external liveness tick on each cron sweep.
+        if let Some(ref a) = self.last_tick {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            a.store(secs, Ordering::Relaxed);
+        }
+
         let routines = match self.store.list_due_cron_routines().await {
             Ok(r) => r,
             Err(e) => {

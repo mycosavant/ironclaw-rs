@@ -92,6 +92,10 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            sse_tickets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            heartbeat_last_tick: None,
+            routine_last_tick: None,
+            repair_last_tick: None,
         });
 
         Self {
@@ -125,6 +129,10 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             startup_time: self.state.startup_time,
+            sse_tickets: self.state.sse_tickets.clone(),
+            heartbeat_last_tick: self.state.heartbeat_last_tick.clone(),
+            routine_last_tick: self.state.routine_last_tick.clone(),
+            repair_last_tick: self.state.repair_last_tick.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -221,6 +229,33 @@ impl GatewayChannel {
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
         self.rebuild_state(|s| s.cost_guard = Some(cg));
+        self
+    }
+
+    /// Inject the heartbeat liveness tick atomic.
+    pub fn with_heartbeat_tick(
+        mut self,
+        tick: Arc<std::sync::atomic::AtomicI64>,
+    ) -> Self {
+        self.rebuild_state(|s| s.heartbeat_last_tick = Some(tick));
+        self
+    }
+
+    /// Inject the routine engine liveness tick atomic.
+    pub fn with_routine_tick(
+        mut self,
+        tick: Arc<std::sync::atomic::AtomicI64>,
+    ) -> Self {
+        self.rebuild_state(|s| s.routine_last_tick = Some(tick));
+        self
+    }
+
+    /// Inject the self-repair liveness tick atomic.
+    pub fn with_repair_tick(
+        mut self,
+        tick: Arc<std::sync::atomic::AtomicI64>,
+    ) -> Self {
+        self.rebuild_state(|s| s.repair_last_tick = Some(tick));
         self
     }
 

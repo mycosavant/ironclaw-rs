@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::policy::{NetworkDecision, NetworkPolicyDecider, NetworkRequest};
-use crate::secrets::CredentialLocation;
+use crate::secrets::{CredentialLocation, SecretsStore};
 
 /// State shared across proxy connections.
 struct ProxyState {
@@ -66,6 +66,40 @@ pub struct NoCredentialResolver;
 impl CredentialResolver for NoCredentialResolver {
     async fn resolve(&self, _name: &str) -> Option<String> {
         None
+    }
+}
+
+/// A credential resolver backed by the encrypted secrets store.
+///
+/// Secrets are looked up by name under the given user ID and decrypted on demand.
+/// This avoids leaking raw credentials through environment variables — the proxy
+/// is the only place they are materialised into plaintext, and only at
+/// request-injection time.
+pub struct SecretsStoreCredentialResolver {
+    store: Arc<dyn SecretsStore>,
+    user_id: String,
+}
+
+impl SecretsStoreCredentialResolver {
+    /// Create a resolver backed by the given store, resolving secrets for `user_id`.
+    pub fn new(store: Arc<dyn SecretsStore>, user_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            user_id: user_id.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialResolver for SecretsStoreCredentialResolver {
+    async fn resolve(&self, name: &str) -> Option<String> {
+        match self.store.get_decrypted(&self.user_id, name).await {
+            Ok(secret) => Some(secret.expose().to_string()),
+            Err(e) => {
+                tracing::debug!(name, user_id = %self.user_id, "credential not found in store: {}", e);
+                None
+            }
+        }
     }
 }
 

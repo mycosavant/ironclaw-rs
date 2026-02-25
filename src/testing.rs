@@ -292,6 +292,9 @@ impl TestHarnessBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            heartbeat_tick: None,
+            routine_tick: None,
+            repair_tick: None,
         };
 
         TestHarness {

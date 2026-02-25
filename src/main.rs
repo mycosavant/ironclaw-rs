@@ -1,6 +1,7 @@
 //! IronClaw - Main entry point.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -425,6 +426,15 @@ async fn main() -> anyhow::Result<()> {
         components.secrets_store.clone(),
     );
 
+    // ── Background task liveness tick atomics ────────────────────────
+    // Shared between background tasks (heartbeat, routine engine, self-repair)
+    // and the web gateway health endpoint so the browser UI can show whether
+    // each background subsystem is alive and when it last ran.
+
+    let heartbeat_tick = Arc::new(AtomicI64::new(0));
+    let routine_tick = Arc::new(AtomicI64::new(0));
+    let repair_tick = Arc::new(AtomicI64::new(0));
+
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
@@ -479,6 +489,10 @@ async fn main() -> anyhow::Result<()> {
         ));
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
+
+        gw = gw.with_heartbeat_tick(heartbeat_tick.clone());
+        gw = gw.with_routine_tick(routine_tick.clone());
+        gw = gw.with_repair_tick(repair_tick.clone());
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -561,6 +575,9 @@ async fn main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
+        heartbeat_tick: Some(heartbeat_tick),
+        routine_tick: Some(routine_tick),
+        repair_tick: Some(repair_tick),
     };
 
     let agent = Agent::new(

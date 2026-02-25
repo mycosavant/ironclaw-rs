@@ -33,7 +33,10 @@ pub mod http;
 pub mod policy;
 
 pub use allowlist::{DomainAllowlist, DomainPattern, DomainValidationResult};
-pub use http::{CredentialResolver, EnvCredentialResolver, HttpProxy, NoCredentialResolver};
+pub use http::{
+    CredentialResolver, EnvCredentialResolver, HttpProxy, NoCredentialResolver,
+    SecretsStoreCredentialResolver,
+};
 pub use policy::{
     AllowAllDecider, DefaultPolicyDecider, DenyAllDecider, NetworkDecision, NetworkPolicyDecider,
     NetworkRequest,
@@ -43,7 +46,7 @@ use std::sync::Arc;
 
 use crate::sandbox::config::{SandboxConfig, SandboxPolicy, default_credential_mappings};
 use crate::sandbox::error::Result;
-use crate::secrets::CredentialMapping;
+use crate::secrets::{CredentialMapping, SecretsStore};
 
 /// Creates a configured network proxy from sandbox config.
 pub struct NetworkProxyBuilder {
@@ -59,7 +62,11 @@ impl NetworkProxyBuilder {
         Self {
             allowlist: crate::sandbox::config::default_allowlist(),
             credential_mappings: default_credential_mappings(),
-            credential_resolver: Arc::new(EnvCredentialResolver),
+            // Default to no credential resolution: raw env-var forwarding is a
+            // security risk (a compromised container could exfiltrate all secrets
+            // via `env`).  Callers should supply a SecretsStore via
+            // `with_secrets_store()` to enable credential injection.
+            credential_resolver: Arc::new(NoCredentialResolver),
             policy: SandboxPolicy::ReadOnly,
         }
     }
@@ -69,7 +76,7 @@ impl NetworkProxyBuilder {
         Self {
             allowlist: config.network_allowlist.clone(),
             credential_mappings: default_credential_mappings(),
-            credential_resolver: Arc::new(EnvCredentialResolver),
+            credential_resolver: Arc::new(NoCredentialResolver),
             policy: config.policy,
         }
     }
@@ -95,6 +102,21 @@ impl NetworkProxyBuilder {
     /// Set the credential resolver.
     pub fn with_credential_resolver(mut self, resolver: Arc<dyn CredentialResolver>) -> Self {
         self.credential_resolver = resolver;
+        self
+    }
+
+    /// Use the encrypted secrets store for credential injection.
+    ///
+    /// Secrets are resolved by name under `user_id` and decrypted in the host
+    /// proxy process — they never enter the container environment.  This is the
+    /// recommended way to supply API keys to sandboxed jobs.
+    pub fn with_secrets_store(
+        mut self,
+        store: Arc<dyn SecretsStore>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.credential_resolver =
+            Arc::new(SecretsStoreCredentialResolver::new(store, user_id));
         self
     }
 
