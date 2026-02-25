@@ -139,6 +139,14 @@ pub trait ConversationStore: Send + Sync {
         before: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError>;
+    /// Update a single metadata field on a conversation.
+    ///
+    /// **Backend semantic difference:** The PostgreSQL backend uses `jsonb_set` for
+    /// path-targeted updates, while the libSQL backend uses RFC 7396 JSON Merge Patch
+    /// (`json_patch`). Merge patch replaces entire top-level keys — nested keys not
+    /// present in `value` are silently dropped. Callers **must not** rely on partial
+    /// nested-object updates being preserved under libSQL: always supply the complete
+    /// desired subtree for a given top-level key.
     async fn update_conversation_metadata_field(
         &self,
         id: Uuid,
