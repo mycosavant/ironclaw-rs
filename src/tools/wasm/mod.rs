@@ -45,7 +45,7 @@
 //! | Trap recovery | Discard instance, never reuse |
 //! | Side channels | Fresh instance per execution |
 //! | Rate abuse | Per-tool rate limiting |
-//! | WASM tampering | BLAKE3 hash verification on load |
+//! | WASM tampering | SHA-256 hash + Ed25519 signature verification on install |
 //! | Direct tool access | Tool aliasing (indirection layer) |
 //!
 //! # Example

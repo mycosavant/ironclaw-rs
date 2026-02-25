@@ -453,6 +453,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
+| WASM binary verification | ❌ | ✅ | Ed25519 signature + SHA-256 hash at install time; trust store at `~/.ironclaw/trusted_keys/*.hex` |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ❌ | |
