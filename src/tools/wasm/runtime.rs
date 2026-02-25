@@ -31,6 +31,11 @@ pub struct WasmRuntimeConfig {
     pub cache_dir: Option<PathBuf>,
     /// Cranelift optimization level.
     pub optimization_level: OptLevel,
+    /// Maximum number of compiled modules to keep in the in-process cache.
+    /// When the limit is reached, an arbitrary entry is evicted before
+    /// inserting the new one, bounding memory consumed by JIT-compiled native
+    /// code (typically 5–50 MB per module).
+    pub max_cached_modules: usize,
 }
 
 impl Default for WasmRuntimeConfig {
@@ -41,6 +46,7 @@ impl Default for WasmRuntimeConfig {
             cache_compiled: true,
             cache_dir: None,
             optimization_level: OptLevel::Speed,
+            max_cached_modules: 50,
         }
     }
 }
@@ -57,6 +63,7 @@ impl WasmRuntimeConfig {
             cache_compiled: false,
             cache_dir: None,
             optimization_level: OptLevel::None, // Faster compilation for tests
+            max_cached_modules: 10,
         }
     }
 }
@@ -227,10 +234,20 @@ impl WasmToolRuntime {
 
         // Cache the prepared module
         if self.config.cache_compiled {
-            self.modules
-                .write()
-                .await
-                .insert(prepared.name.clone(), Arc::clone(&prepared));
+            let mut modules = self.modules.write().await;
+            // Evict an arbitrary entry when at capacity to bound native-code
+            // memory usage (each PreparedModule holds 5–50 MB of JIT code).
+            if modules.len() >= self.config.max_cached_modules
+                && let Some(evict_key) = modules.keys().next().cloned()
+            {
+                modules.remove(&evict_key);
+                tracing::debug!(
+                    evicted = %evict_key,
+                    limit = self.config.max_cached_modules,
+                    "Evicted WASM module from cache (at capacity)"
+                );
+            }
+            modules.insert(prepared.name.clone(), Arc::clone(&prepared));
         }
 
         tracing::info!(

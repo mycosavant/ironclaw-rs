@@ -177,7 +177,9 @@ const SAFE_ENV_VARS: &[&str] = &[
     "CARGO_HOME",
     "RUSTUP_HOME",
     // Node.js
-    "NODE_PATH",
+    // NOTE: NODE_PATH is intentionally excluded — it can be used to hijack
+    // module resolution by pointing at attacker-controlled directories.
+    // Node's resolver works correctly without it.
     "NPM_CONFIG_PREFIX",
     // Editor (for git commit, etc.)
     "EDITOR",
@@ -222,8 +224,21 @@ pub fn detect_command_injection(cmd: &str) -> Option<&'static str> {
 
     let lower = cmd.to_lowercase();
 
-    // Base64 decode piped to shell execution (obfuscation of arbitrary commands)
-    if (lower.contains("base64 -d") || lower.contains("base64 --decode"))
+    // Reject variable/command substitution patterns that bypass space-based pattern
+    // matching (e.g. sudo${IFS}cat, sudo\tfile, or arbitrary ${var} expansion).
+    // These can never appear in legitimate commands processed by this tool.
+    if cmd.contains("${")
+        || cmd.contains("`")
+        || cmd.bytes().any(|b| b == b'\t')
+    {
+        return Some("variable/command substitution or tab separator detected");
+    }
+
+    // Base64 decode piped to shell execution (obfuscation of arbitrary commands).
+    // Covers GNU base64 (-d / --decode) and macOS base64 (-D).
+    if (lower.contains("base64 -d")
+        || lower.contains("base64 --decode")
+        || lower.contains("base64 -D"))
         && contains_shell_pipe(&lower)
     {
         return Some("base64 decode piped to shell");

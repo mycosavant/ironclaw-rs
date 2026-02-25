@@ -33,13 +33,16 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Fall back to query parameter for SSE EventSource (constant-time comparison)
+    // Fall back to query parameter for SSE EventSource (constant-time comparison).
+    // Percent-decode the raw value before comparing so tokens containing '+', '=',
+    // or other special characters work correctly when the browser encodes the URL.
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=")
-                && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-            {
-                return next.run(request).await;
+            if let Some(raw) = pair.strip_prefix("token=") {
+                let token = urlencoding::decode(raw).unwrap_or(std::borrow::Cow::Borrowed(raw));
+                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
+                    return next.run(request).await;
+                }
             }
         }
     }

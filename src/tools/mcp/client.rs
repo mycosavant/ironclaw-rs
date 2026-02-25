@@ -68,7 +68,9 @@ impl McpClient {
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize MCP HTTP client (TLS unavailable? check HTTPS_PROXY): {e}")
+                }),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
@@ -88,7 +90,9 @@ impl McpClient {
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize MCP HTTP client (TLS unavailable? check HTTPS_PROXY): {e}")
+                }),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
@@ -113,7 +117,9 @@ impl McpClient {
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize MCP HTTP client (TLS unavailable? check HTTPS_PROXY): {e}")
+                }),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),

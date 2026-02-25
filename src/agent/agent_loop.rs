@@ -665,6 +665,13 @@ impl Agent {
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
+                // Wrap content from external (untrusted) channels in a SECURITY NOTICE
+                // frame so the LLM treats it as data, not instructions.
+                // Local UI channels (repl, gateway, tui) are trusted and pass through.
+                let content = match message.channel.as_str() {
+                    "repl" | "gateway" | "tui" => content,
+                    chan => crate::safety::wrap_external_content(chan, &content),
+                };
                 self.process_user_input(message, session, thread_id, &content)
                     .await
             }

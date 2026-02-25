@@ -21,6 +21,9 @@ pub struct WasmConfig {
     pub cache_compiled: bool,
     /// Directory for compiled module cache.
     pub cache_dir: Option<PathBuf>,
+    /// Maximum number of compiled modules to keep in the in-process cache.
+    /// Default: 50. Each cached module holds 5–50 MB of JIT-compiled native code.
+    pub max_cached_modules: usize,
 }
 
 impl Default for WasmConfig {
@@ -33,6 +36,7 @@ impl Default for WasmConfig {
             default_fuel_limit: 10_000_000,
             cache_compiled: true,
             cache_dir: None,
+            max_cached_modules: 50,
         }
     }
 }
@@ -60,6 +64,7 @@ impl WasmConfig {
             default_fuel_limit: parse_optional_env("WASM_DEFAULT_FUEL_LIMIT", 10_000_000)?,
             cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", true)?,
             cache_dir: optional_env("WASM_CACHE_DIR")?.map(PathBuf::from),
+            max_cached_modules: parse_optional_env("WASM_MAX_CACHED_MODULES", 50usize)?,
         })
     }
 
@@ -80,6 +85,7 @@ impl WasmConfig {
             cache_compiled: self.cache_compiled,
             cache_dir: self.cache_dir.clone(),
             optimization_level: wasmtime::OptLevel::Speed,
+            max_cached_modules: self.max_cached_modules,
         }
     }
 }

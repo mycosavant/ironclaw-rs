@@ -84,13 +84,21 @@ impl RateLimiter {
             .unwrap_or_default()
             .as_secs();
 
-        let window = self.window_start.load(Ordering::Relaxed);
+        let window = self.window_start.load(Ordering::Acquire);
         if now.saturating_sub(window) >= self.window_secs {
-            // Window expired, reset
-            self.window_start.store(now, Ordering::Relaxed);
-            self.remaining
-                .store(self.max_requests - 1, Ordering::Relaxed);
-            return true;
+            // Window expired. Use compare_exchange to atomically claim the reset
+            // so concurrent callers can't both reset and each get a full budget.
+            if self
+                .window_start
+                .compare_exchange(window, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                // We own the reset: consume one slot for this request.
+                self.remaining
+                    .store(self.max_requests - 1, Ordering::Release);
+                return true;
+            }
+            // Another thread beat us to the reset; fall through to normal decrement.
         }
 
         // Try to decrement remaining
@@ -305,9 +313,18 @@ pub async fn start_server(
 
     // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
     // origins are allowed, since the gateway is a local-first service.
+    // When binding to 0.0.0.0 (all interfaces), addr.ip() returns "0.0.0.0"
+    // which is not a valid browser origin. Normalise to "localhost" so the CORS
+    // allow-list actually matches requests from the browser UI.
+    let effective_origin_host = if addr.ip().is_unspecified() {
+        "localhost".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+
     let cors = CorsLayer::new()
         .allow_origin([
-            format!("http://{}:{}", addr.ip(), addr.port())
+            format!("http://{}:{}", effective_origin_host, addr.port())
                 .parse()
                 .expect("valid origin"),
             format!("http://localhost:{}", addr.port())

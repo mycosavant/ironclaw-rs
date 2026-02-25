@@ -39,7 +39,12 @@ impl HttpTool {
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to initialize HTTP tool client (is a TLS backend available? \
+                     Is HTTPS_PROXY set to a valid URL?): {e}"
+                )
+            });
 
         Self {
             client,

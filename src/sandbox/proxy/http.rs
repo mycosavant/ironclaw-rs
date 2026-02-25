@@ -86,7 +86,14 @@ impl HttpProxy {
             state: Arc::new(ProxyState {
                 decider,
                 credential_resolver,
-                http_client: reqwest::Client::new(),
+                // Cap idle connections per host to prevent a malicious container
+                // from exhausting the host's file-descriptor pool by opening
+                // thousands of parallel outbound connections through the proxy.
+                http_client: reqwest::Client::builder()
+                    .pool_max_idle_per_host(20)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()
+                    .expect("Failed to build proxy HTTP client"),
                 request_count: std::sync::atomic::AtomicU64::new(0),
                 running: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -97,11 +104,22 @@ impl HttpProxy {
 
     /// Start the proxy server on the given port (0 for auto-assign).
     pub async fn start(&self, port: u16) -> Result<SocketAddr> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .await
-            .map_err(|e| SandboxError::ProxyError {
-                reason: format!("failed to bind: {}", e),
-            })?;
+        // On Linux, containers connect to the host via the Docker bridge interface
+        // (172.17.0.1). On macOS/Windows, host.docker.internal resolves to the
+        // loopback address, so 127.0.0.1 works. Bind to the correct address for
+        // each platform so the network allowlist and credential injection are
+        // actually reachable from container processes.
+        let bind_addr = if cfg!(target_os = "linux") {
+            format!("172.17.0.1:{}", port)
+        } else {
+            format!("127.0.0.1:{}", port)
+        };
+        let listener =
+            TcpListener::bind(&bind_addr)
+                .await
+                .map_err(|e| SandboxError::ProxyError {
+                    reason: format!("failed to bind: {}", e),
+                })?;
 
         let addr = listener
             .local_addr()
