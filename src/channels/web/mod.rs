@@ -236,28 +236,19 @@ impl GatewayChannel {
     }
 
     /// Inject the heartbeat liveness tick atomic.
-    pub fn with_heartbeat_tick(
-        mut self,
-        tick: Arc<std::sync::atomic::AtomicI64>,
-    ) -> Self {
+    pub fn with_heartbeat_tick(mut self, tick: Arc<std::sync::atomic::AtomicI64>) -> Self {
         self.rebuild_state(|s| s.heartbeat_last_tick = Some(tick));
         self
     }
 
     /// Inject the routine engine liveness tick atomic.
-    pub fn with_routine_tick(
-        mut self,
-        tick: Arc<std::sync::atomic::AtomicI64>,
-    ) -> Self {
+    pub fn with_routine_tick(mut self, tick: Arc<std::sync::atomic::AtomicI64>) -> Self {
         self.rebuild_state(|s| s.routine_last_tick = Some(tick));
         self
     }
 
     /// Inject the self-repair liveness tick atomic.
-    pub fn with_repair_tick(
-        mut self,
-        tick: Arc<std::sync::atomic::AtomicI64>,
-    ) -> Self {
+    pub fn with_repair_tick(mut self, tick: Arc<std::sync::atomic::AtomicI64>) -> Self {
         self.rebuild_state(|s| s.repair_last_tick = Some(tick));
         self
     }

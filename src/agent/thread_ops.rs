@@ -318,7 +318,10 @@ impl Agent {
 
         // Complete, fail, or request approval
         match result {
-            Ok(AgenticLoopResult::Response { text: response, had_high_severity }) => {
+            Ok(AgenticLoopResult::Response {
+                text: response,
+                had_high_severity,
+            }) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -345,9 +348,9 @@ impl Agent {
                 let quarantine_triggered = {
                     let had = had_high_severity;
                     if had {
-                        thread.injection_counter.record_warning_severity(
-                            &crate::safety::Severity::High,
-                        );
+                        thread
+                            .injection_counter
+                            .record_warning_severity(&crate::safety::Severity::High);
                     }
                     thread.injection_counter.end_turn()
                 };
@@ -1106,15 +1109,18 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response { text: response, had_high_severity }) => {
+                Ok(AgenticLoopResult::Response {
+                    text: response,
+                    had_high_severity,
+                }) => {
                     // Update injection circuit breaker (merge warnings from both
                     // the local approval-tool execution and the agentic loop).
                     let quarantine_triggered = {
                         let any_high = had_high_severity || had_high_approval;
                         if any_high {
-                            thread.injection_counter.record_warning_severity(
-                                &crate::safety::Severity::High,
-                            );
+                            thread
+                                .injection_counter
+                                .record_warning_severity(&crate::safety::Severity::High);
                         }
                         thread.injection_counter.end_turn()
                     };

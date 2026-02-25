@@ -245,7 +245,10 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response { text, had_high_severity });
+                    return Ok(AgenticLoopResult::Response {
+                        text,
+                        had_high_severity,
+                    });
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -626,7 +629,10 @@ impl Agent {
 
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
-                        return Ok(AgenticLoopResult::Response { text: instructions, had_high_severity });
+                        return Ok(AgenticLoopResult::Response {
+                            text: instructions,
+                            had_high_severity,
+                        });
                     }
 
                     // Handle approval if a tool needed it

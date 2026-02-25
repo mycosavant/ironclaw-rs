@@ -39,7 +39,9 @@ pub async fn auth_middleware(
         && let Ok(value) = auth_header.to_str()
         && let Some(token) = value.strip_prefix("Bearer ")
         && (bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-            || validate_and_touch(&auth.session_store, token).await.is_some())
+            || validate_and_touch(&auth.session_store, token)
+                .await
+                .is_some())
     {
         return next.run(request).await;
     }

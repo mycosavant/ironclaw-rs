@@ -569,9 +569,7 @@ async fn session_delete_handler(
 ///
 /// Lists active sessions (IDs and timestamps only — tokens are never returned
 /// after creation).
-async fn session_list_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> Json<SessionListResponse> {
+async fn session_list_handler(State(state): State<Arc<GatewayState>>) -> Json<SessionListResponse> {
     let sessions = session_store::list_sessions(&state.session_store).await;
     let now = std::time::Instant::now();
     Json(SessionListResponse {

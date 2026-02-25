@@ -603,12 +603,9 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?
             } else {
-                LibSqlBackend::new_local(
-                    db_path,
-                    config.database.libsql_encryption_key.as_ref(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?
+                LibSqlBackend::new_local(db_path, config.database.libsql_encryption_key.as_ref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
             };
             backend
                 .run_migrations()

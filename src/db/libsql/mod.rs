@@ -163,11 +163,8 @@ impl LibSqlBackend {
             })?;
         }
 
-        let mut builder = libsql::Builder::new_remote_replica(
-            path,
-            url.to_string(),
-            auth_token.to_string(),
-        );
+        let mut builder =
+            libsql::Builder::new_remote_replica(path, url.to_string(), auth_token.to_string());
         if let Some(cfg) = Self::make_encryption_config(encryption_key) {
             builder = builder.encryption_config(cfg);
         }

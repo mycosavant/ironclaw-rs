@@ -25,8 +25,7 @@ const QUARANTINE_DURATION_SECS: u64 = 300;
 pub const QUARANTINE_EXIT_COMMAND: &str = "/unquarantine";
 
 /// Canned message shown every time the user sends input while quarantined.
-pub const QUARANTINE_NOTICE: &str =
-    "⚠️  QUARANTINE ACTIVE — Multiple high-severity prompt injection attempts \
+pub const QUARANTINE_NOTICE: &str = "⚠️  QUARANTINE ACTIVE — Multiple high-severity prompt injection attempts \
      were detected in recent tool outputs. Tool calls are suspended to protect \
      your data.\n\n\
      When you are ready to resume normal operation, type: /unquarantine";
@@ -84,9 +83,8 @@ impl InjectionCounter {
             if self.consecutive_high_severity >= QUARANTINE_THRESHOLD
                 && self.quarantine_until.is_none()
             {
-                self.quarantine_until = Some(
-                    Instant::now() + Duration::from_secs(QUARANTINE_DURATION_SECS),
-                );
+                self.quarantine_until =
+                    Some(Instant::now() + Duration::from_secs(QUARANTINE_DURATION_SECS));
                 return true;
             }
         } else {
