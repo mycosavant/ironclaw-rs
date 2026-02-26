@@ -36,7 +36,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP endpoints for Control UI       | ✅       | ✅       | Web dashboard with chat, memory, jobs, logs, extensions                             |
 | Channel connection lifecycle        | ✅       | ✅       | ChannelManager + WebSocket tracker                                                  |
 | Session management/routing          | ✅       | ✅       | SessionManager exists                                                               |
-| Configuration hot-reload            | ✅       | ❌       |                                                                                     |
+| Configuration hot-reload            | ✅       | ✅       | `notify` crate; watches `config.toml`, `settings.json`, `.env`; 300ms debounce     |
 | Network modes (loopback/LAN/remote) | ✅       | 🚧       | HTTP only                                                                           |
 | OpenAI-compatible HTTP API          | ✅       | ✅       | /v1/chat/completions, per-request `model` override                                  |
 | Canvas hosting                      | ✅       | ❌       | Agent-driven UI                                                                     |
@@ -45,9 +45,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery              | ✅       | ❌       |                                                                                     |
 | Tailscale integration               | ✅       | ❌       |                                                                                     |
 | Health check endpoints              | ✅       | ✅       | /api/health + /api/gateway/status                                                   |
-| `doctor` diagnostics                | ✅       | ✅       |                                                                      |
+| `doctor` diagnostics                | ✅       | ✅       |                                                                                     |
 | Agent event broadcast               | ✅       | 🚧       | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
-| Channel health monitor              | ✅       | ❌       | Auto-restart with configurable interval                                             |
+| Channel health monitor              | ✅       | ✅       | 3-state FSM (Healthy/Degraded/Failed); configurable thresholds; notifications injected |
 | Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                      |
 | Trusted-proxy auth mode             | ✅       | ❌       | Header-based auth for reverse proxies                                               |
 | APNs push pipeline                  | ✅       | ❌       | Wake disconnected iOS nodes via push                                                |
@@ -132,36 +132,36 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 4. CLI Commands
 
-| Command                    | OpenClaw | IronClaw | Priority | Notes                                                      |
-| -------------------------- | -------- | -------- | -------- | ---------------------------------------------------------- |
-| `run` (agent)              | ✅       | ✅       | -        | Default command                                            |
-| `tool install/list/remove` | ✅       | ✅       | -        | WASM tools                                                 |
-| `gateway start/stop`       | ✅       | ✅       | P2       | `ironclaw gateway status/logs/stop/start`                              |
-| `onboard` (wizard)         | ✅       | ✅       | -        | Interactive setup                                          |
-| `tui`                      | ✅       | ✅       | -        | Ratatui TUI                                                |
-| `config`                   | ✅       | ✅       | -        | Read/write config                                          |
-| `channels`                 | ✅       | ✅       | P2       | Channel management (list/install/remove/status)                          |
-| `models`                   | ✅       | 🚧       | -        | Model selector in TUI                                      |
-| `status`                   | ✅       | ✅       | -        | System status (enriched session details)                   |
-| `agents`                   | ✅       | ❌       | P3       | Multi-agent management                                     |
-| `sessions`                 | ✅       | ❌       | P3       | Session listing (shows subagent models)                    |
-| `memory`                   | ✅       | ✅       | -        | Memory search CLI                                          |
-| `skills`                   | ✅       | ✅       | -        | Skills tools + web API endpoints (install, list, activate) |
-| `pairing`                  | ✅       | ✅       | -        | list/approve, account selector                             |
-| `nodes`                    | ✅       | ❌       | P3       | Device management, remove/clear flows                      |
-| `plugins`                  | ✅       | ❌       | P3       | Plugin management                                          |
-| `hooks`                    | ✅       | ✅       | P2       | Lifecycle hooks                                            |
-| `cron`                     | ✅       | ✅       | P2       | list/show/add/edit/remove/webhook subcommands              |
-| `webhooks`                 | ✅       | ❌       | P3       | Webhook config                                             |
-| `message send`             | ✅       | ✅       | P2       | HTTP POST to running gateway via GATEWAY_AUTH_TOKEN        |
-| `browser`                  | ✅       | ❌       | P3       | Browser automation                                         |
-| `sandbox`                  | ✅       | ✅       | -        | WASM sandbox                                               |
-| `doctor`                   | ✅       | ✅       | P2       | Expanded: LLM/sandbox/gateway/extensions checks; Warn severity           |
-| `logs`                     | ✅       | ❌       | P3       | Query logs                                                 |
-| `update`                   | ✅       | ❌       | P3       | Self-update                                                |
-| `completion`               | ✅       | ❌       | P3       | Shell completion                                           |
-| `/subagents spawn`         | ✅       | ❌       | P3       | Spawn subagents from chat                                  |
-| `/export-session`          | ✅       | ❌       | P3       | Export current session transcript                          |
+| Command                    | OpenClaw | IronClaw | Priority | Notes                                                          |
+| -------------------------- | -------- | -------- | -------- | -------------------------------------------------------------- |
+| `run` (agent)              | ✅       | ✅       | -        | Default command                                                |
+| `tool install/list/remove` | ✅       | ✅       | -        | WASM tools                                                     |
+| `gateway start/stop`       | ✅       | ✅       | P2       | `ironclaw gateway status/logs/stop/start`                      |
+| `onboard` (wizard)         | ✅       | ✅       | -        | Interactive setup                                              |
+| `tui`                      | ✅       | ✅       | -        | Ratatui TUI                                                    |
+| `config`                   | ✅       | ✅       | -        | Read/write config                                              |
+| `channels`                 | ✅       | ✅       | P2       | Channel management (list/install/remove/status)                |
+| `models`                   | ✅       | 🚧       | -        | Model selector in TUI                                          |
+| `status`                   | ✅       | ✅       | -        | System status (enriched session details)                       |
+| `agents`                   | ✅       | ❌       | P3       | Multi-agent management                                         |
+| `sessions`                 | ✅       | ❌       | P3       | Session listing (shows subagent models)                        |
+| `memory`                   | ✅       | ✅       | -        | Memory search CLI                                              |
+| `skills`                   | ✅       | ✅       | -        | Skills tools + web API endpoints (install, list, activate)     |
+| `pairing`                  | ✅       | ✅       | -        | list/approve, account selector                                 |
+| `nodes`                    | ✅       | ❌       | P3       | Device management, remove/clear flows                          |
+| `plugins`                  | ✅       | ❌       | P3       | Plugin management                                              |
+| `hooks`                    | ✅       | ✅       | P2       | Lifecycle hooks                                                |
+| `cron`                     | ✅       | ✅       | P2       | list/show/add/edit/remove/webhook subcommands                  |
+| `webhooks`                 | ✅       | ❌       | P3       | Webhook config                                                 |
+| `message send`             | ✅       | ✅       | P2       | HTTP POST to running gateway via GATEWAY_AUTH_TOKEN            |
+| `browser`                  | ✅       | ❌       | P3       | Browser automation                                             |
+| `sandbox`                  | ✅       | ✅       | -        | WASM sandbox                                                   |
+| `doctor`                   | ✅       | ✅       | P2       | Expanded: LLM/sandbox/gateway/extensions checks; Warn severity |
+| `logs`                     | ✅       | ❌       | P3       | Query logs                                                     |
+| `update`                   | ✅       | ❌       | P3       | Self-update                                                    |
+| `completion`               | ✅       | ❌       | P3       | Shell completion                                               |
+| `/subagents spawn`         | ✅       | ❌       | P3       | Spawn subagents from chat                                      |
+| `/export-session`          | ✅       | ❌       | P3       | Export current session transcript                              |
 
 ### Owner: _Unassigned_
 
@@ -247,21 +247,21 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 7. Media Handling
 
-| Feature                        | OpenClaw | IronClaw | Priority | Notes                                   |
-| ------------------------------ | -------- | -------- | -------- | --------------------------------------- |
-| Image processing (Sharp)       | ✅       | ❌       | P2       | Resize, format convert                  |
-| Configurable image resize dims | ✅       | ❌       | P2       | Per-agent dimension config              |
-| Multiple images per tool call  | ✅       | ✅       | P2       | `image_analyze` accepts up to 10 images per call (base64 data-URI) |
-| Audio transcription            | ✅       | ✅       | P2       | `audio_transcribe` via OpenAI Whisper API (multipart upload, 25 MiB max) |
-| Video support                  | ✅       | ❌       | P3       |                                         |
-| PDF parsing                    | ✅       | ✅       | P2       | `pdf_extract_text` via lopdf + pdf-extract, 128 KiB output cap |
-| MIME detection                 | ✅       | ✅       | P2       | `media_info`: magic-byte MIME via infer crate + image dimensions |
-| Media caching                  | ✅       | ❌       | P3       |                                         |
+| Feature                        | OpenClaw | IronClaw | Priority | Notes                                                                                                     |
+| ------------------------------ | -------- | -------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| Image processing (Sharp)       | ✅       | ❌       | P2       | Resize, format convert                                                                                    |
+| Configurable image resize dims | ✅       | ❌       | P2       | Per-agent dimension config                                                                                |
+| Multiple images per tool call  | ✅       | ✅       | P2       | `image_analyze` accepts up to 10 images per call (base64 data-URI)                                        |
+| Audio transcription            | ✅       | ✅       | P2       | `audio_transcribe` via OpenAI Whisper API (multipart upload, 25 MiB max)                                  |
+| Video support                  | ✅       | ❌       | P3       |                                                                                                           |
+| PDF parsing                    | ✅       | ✅       | P2       | `pdf_extract_text` via lopdf + pdf-extract, 128 KiB output cap                                            |
+| MIME detection                 | ✅       | ✅       | P2       | `media_info`: magic-byte MIME via infer crate + image dimensions                                          |
+| Media caching                  | ✅       | ❌       | P3       |                                                                                                           |
 | Vision model integration       | ✅       | ✅       | P2       | `image_analyze` tool: base64 data-URI, 1-10 images, 20 MiB each, multi-modal LLM prompt via `ContentPart` |
-| TTS (Edge TTS)                 | ✅       | ❌       | P3       | Text-to-speech                          |
-| TTS (OpenAI)                   | ✅       | ❌       | P3       |                                         |
-| Incremental TTS playback       | ✅       | ❌       | P3       | iOS progressive playback                |
-| Sticker-to-image               | ✅       | ❌       | P3       | Telegram stickers                       |
+| TTS (Edge TTS)                 | ✅       | ❌       | P3       | Text-to-speech                                                                                            |
+| TTS (OpenAI)                   | ✅       | ❌       | P3       |                                                                                                           |
+| Incremental TTS playback       | ✅       | ❌       | P3       | iOS progressive playback                                                                                  |
+| Sticker-to-image               | ✅       | ❌       | P3       | Telegram stickers                                                                                         |
 
 ### Owner: _Unassigned_
 
@@ -283,8 +283,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Provider plugins               | ✅       | ❌       |                                               |
 | Plugin CLI (`install`, `list`) | ✅       | ✅       | `tool` subcommand                             |
 | ClawHub registry               | ✅       | ❌       | Discovery                                     |
-| `before_agent_start` hook      | ✅       | ❌       | modelOverride/providerOverride support        |
-| `before_message_write` hook    | ✅       | ❌       | Pre-write message interception                |
+| `before_agent_start` hook      | ✅       | ✅       | Fires before main loop; model/provider override logged                |
+| `before_message_write` hook    | ✅       | ✅       | Fires before user/assistant persist; hook can suppress or modify content |
 | `llm_input`/`llm_output` hooks | ✅       | ❌       | LLM payload inspection                        |
 
 ### Owner: _Unassigned_
@@ -410,12 +410,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron finished-run webhook      | ✅       | ❌       | P3       | Webhook on job completion                  |
 | Timezone support               | ✅       | ✅       | -        | Via cron expressions                       |
 | One-shot/recurring jobs        | ✅       | ✅       | -        | Manual + cron triggers                     |
-| Channel health monitor         | ✅       | ❌       | P2       | Auto-restart with configurable interval    |
+| Channel health monitor         | ✅       | ✅       | P2       | 3-state FSM; configurable thresholds; injected notifications        |
 | `beforeInbound` hook           | ✅       | ✅       | P2       |                                            |
 | `beforeOutbound` hook          | ✅       | ✅       | P2       |                                            |
 | `beforeToolCall` hook          | ✅       | ✅       | P2       |                                            |
-| `before_agent_start` hook      | ✅       | ❌       | P2       | Model/provider override                    |
-| `before_message_write` hook    | ✅       | ❌       | P2       | Pre-write interception                     |
+| `before_agent_start` hook      | ✅       | ✅       | P2       | Fires before main loop; model/provider override logged              |
+| `before_message_write` hook    | ✅       | ✅       | P2       | Fires before persist; hook can suppress or modify content           |
 | `onMessage` hook               | ✅       | ✅       | -        | Routines with event trigger                |
 | `onSessionStart` hook          | ✅       | ✅       | P2       |                                            |
 | `onSessionEnd` hook            | ✅       | ✅       | P2       |                                            |
@@ -536,11 +536,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### P2 - Medium Priority
 
-- ❌ Media handling (images, PDFs)
+- ✅ Media handling: `media_info`, `audio_transcribe`, `pdf_extract_text`, `image_analyze`, multi-modal vision
 - ✅ Ollama/local model support (via rig::providers::ollama)
-- ❌ Configuration hot-reload
+- ✅ Configuration hot-reload (`notify` crate; watches config.toml, settings.json, .env; 300ms debounce)
 - ✅ Webhook trigger endpoint in web gateway (public /hooks/routine/{path} with HMAC-SHA256)
-- ❌ Channel health monitor with auto-restart
+- ✅ Channel health monitor (3-state FSM: Healthy/Degraded/Failed; state-transition notifications)
 - ✅ Partial output preservation on abort (Interrupted variant with partial content)
 
 ### P3 - Lower Priority
