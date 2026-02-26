@@ -68,7 +68,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WASM channels | ❌       | ✅       | -        | IronClaw innovation                                              |
 | WhatsApp      | ✅       | ❌       | P3       | Baileys (Web), same-phone mode with echo detection               |
 | Telegram      | ✅       | ✅       | -        | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
-| Discord       | ✅       | ❌       | P2       | discord.js, thread parent binding inheritance                    |
+| Discord       | ✅       | ✅       | -        | WASM channel; slash cmds, buttons, thread parent binding, pairing |
 | Signal        | ✅       | ✅       | -        | signal-cli REST API, WASM channel, polling mode                  |
 | Slack         | ✅       | ✅       | -        | WASM channel, streaming draft replies (on_status Thinking)       |
 | iMessage      | ✅       | ❌       | P3       | BlueBubbles or Linq recommended                                  |
@@ -100,7 +100,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | --------------------------------- | -------- | -------- | ----------------------------------- |
 | Forwarded attachment downloads    | ✅       | ❌       | Fetch media from forwarded messages |
 | Faster reaction state machine     | ✅       | ❌       | Watchdog + debounce                 |
-| Thread parent binding inheritance | ✅       | ❌       | Threads inherit parent routing      |
+| Thread parent binding inheritance | ✅       | ✅       | resolve_channel_and_thread(); REST channels/{id}/messages for threads |
 
 ### Slack-Specific Features (since Feb 2025)
 
@@ -545,7 +545,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### P3 - Lower Priority
 
-- ❌ Discord channel
+- ✅ Discord channel (WASM, thread parent binding)
 - ❌ WhatsApp channel
 - ❌ Matrix channel
 - ❌ Other messaging platforms

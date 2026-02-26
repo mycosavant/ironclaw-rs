@@ -31,6 +31,26 @@ use exports::near::agent::channel::{
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
+/// Partial Discord channel/thread object included in interaction payloads.
+/// Used to detect thread context for reply routing.
+#[derive(Debug, Deserialize, Clone)]
+struct DiscordChannelInfo {
+    id: String,
+    /// Channel type. Thread types: 10=GUILD_NEWS_THREAD, 11=GUILD_PUBLIC_THREAD,
+    /// 12=GUILD_PRIVATE_THREAD.
+    #[serde(rename = "type")]
+    channel_type: u8,
+    /// Parent channel ID — only present on thread channels.
+    parent_id: Option<String>,
+}
+
+impl DiscordChannelInfo {
+    /// Returns `true` when this channel object describes a thread (any variant).
+    fn is_thread(&self) -> bool {
+        matches!(self.channel_type, 10..=12)
+    }
+}
+
 /// Discord interaction wrapper.
 #[derive(Debug, Deserialize)]
 struct DiscordInteraction {
@@ -65,6 +85,10 @@ struct DiscordInteraction {
 
     /// Token for responding
     token: String,
+
+    /// Partial channel object — present on slash commands, contains type + parent_id
+    /// for thread context detection.
+    channel: Option<DiscordChannelInfo>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -258,12 +282,6 @@ impl Guest for DiscordChannel {
         let metadata: DiscordMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Use webhook endpoint for followup
-        let url = format!(
-            "https://discord.com/api/v10/webhooks/{}/{}",
-            metadata.application_id, metadata.token
-        );
-
         // Truncate content to 2000 characters to comply with Discord limits
         let content = truncate_message(&response.content);
 
@@ -285,6 +303,27 @@ impl Guest for DiscordChannel {
             "Content-Type": "application/json"
         });
 
+        // Thread parent binding inheritance: when the original interaction came from
+        // inside a thread, route the reply directly to that thread channel via the
+        // REST API so the binding remains valid beyond the 15-minute interaction
+        // webhook window.
+        let url = if let Some(ref thread_id) = metadata.thread_id {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Routing response to thread {}", thread_id),
+            );
+            format!(
+                "https://discord.com/api/v10/channels/{}/messages",
+                thread_id
+            )
+        } else {
+            // No thread context — use the interaction followup webhook (standard path).
+            format!(
+                "https://discord.com/api/v10/webhooks/{}/{}",
+                metadata.application_id, metadata.token
+            )
+        };
+
         let result = channel_host::http_request(
             "POST",
             &url,
@@ -296,7 +335,14 @@ impl Guest for DiscordChannel {
         match result {
             Ok(http_response) => {
                 if http_response.status >= 200 && http_response.status < 300 {
-                    channel_host::log(channel_host::LogLevel::Debug, "Posted followup to Discord");
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        if metadata.thread_id.is_some() {
+                            "Posted message to Discord thread"
+                        } else {
+                            "Posted followup to Discord"
+                        },
+                    );
                     Ok(())
                 } else {
                     let body_str = String::from_utf8_lossy(&http_response.body);
@@ -354,7 +400,13 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         return false;
     }
 
-    let channel_id = interaction.channel_id.clone().unwrap_or_default();
+    // Detect thread context: if the interaction originated inside a thread, inherit
+    // its ID so replies are routed back into the correct thread ("thread parent
+    // binding inheritance").
+    let (channel_id, thread_id) = resolve_channel_and_thread(
+        interaction.channel_id.as_deref(),
+        interaction.channel.as_ref(),
+    );
 
     let command_name = interaction
         .data
@@ -379,7 +431,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         interaction_id: interaction.id.clone(),
         token: interaction.token.clone(),
         application_id: interaction.application_id.clone(),
-        thread_id: None,
+        thread_id: thread_id.clone(),
     };
 
     let metadata_json = match serde_json::to_string(&metadata) {
@@ -408,11 +460,18 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         }
     };
 
+    if let Some(ref tid) = thread_id {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!("Slash command in thread {} (parent {})", tid, channel_id),
+        );
+    }
+
     channel_host::emit_message(&EmittedMessage {
         user_id,
         user_name: Some(user_name),
         content,
-        thread_id: None,
+        thread_id,
         metadata_json,
     });
     true
@@ -440,14 +499,18 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
         return;
     }
 
-    let channel_id = message.channel_id.clone();
+    // Thread context: component messages carry channel info on the outer interaction
+    let (channel_id, thread_id) = resolve_channel_and_thread(
+        Some(&message.channel_id),
+        interaction.channel.as_ref(),
+    );
 
     let metadata = DiscordMessageMetadata {
         channel_id: channel_id.clone(),
         interaction_id: interaction.id.clone(),
         token: interaction.token.clone(),
         application_id: interaction.application_id.clone(),
-        thread_id: None,
+        thread_id: thread_id.clone(),
     };
 
     let metadata_json = match serde_json::to_string(&metadata) {
@@ -465,9 +528,43 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
         user_id,
         user_name: Some(user_name),
         content: format!("[Button clicked] {}", message.content),
-        thread_id: None,
+        thread_id,
         metadata_json,
     });
+}
+
+// ============================================================================
+// Thread Routing
+// ============================================================================
+
+/// Resolves the effective `(channel_id, thread_id)` pair for reply routing.
+///
+/// When an interaction originates inside a thread, the response must be routed
+/// back into that thread — "thread parent binding inheritance". The logic is:
+///
+/// - If `channel_info` describes a thread (type 10/11/12):
+///   - `channel_id` = the thread's `parent_id` (the owning text/forum channel)
+///   - `thread_id`  = the thread's own channel ID
+/// - Otherwise `channel_id` is taken from `fallback_channel_id` and `thread_id`
+///   is `None`.
+///
+/// `fallback_channel_id` is the `channel_id` field on the top-level interaction.
+fn resolve_channel_and_thread(
+    fallback_channel_id: Option<&str>,
+    channel_info: Option<&DiscordChannelInfo>,
+) -> (String, Option<String>) {
+    if let Some(ch) = channel_info {
+        if ch.is_thread() {
+            let thread_id = ch.id.clone();
+            let parent_channel_id = ch
+                .parent_id
+                .clone()
+                .or_else(|| fallback_channel_id.map(str::to_owned))
+                .unwrap_or_default();
+            return (parent_channel_id, Some(thread_id));
+        }
+    }
+    (fallback_channel_id.unwrap_or("").to_owned(), None)
 }
 
 // ============================================================================
@@ -682,5 +779,107 @@ mod tests {
         let parsed: DiscordMessageMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.channel_id, "123");
         assert_eq!(parsed.interaction_id, "456");
+    }
+
+    #[test]
+    fn test_metadata_serialization_with_thread() {
+        let metadata = DiscordMessageMetadata {
+            channel_id: "parent_ch".into(),
+            interaction_id: "456".into(),
+            token: "abc".into(),
+            application_id: "789".into(),
+            thread_id: Some("thread_ch".into()),
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: DiscordMessageMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.thread_id.as_deref(), Some("thread_ch"));
+    }
+
+    // ---- resolve_channel_and_thread ----------------------------------------
+
+    #[test]
+    fn test_resolve_non_thread_channel() {
+        // Type 0 = GUILD_TEXT — not a thread; fallback channel_id is used, thread_id is None.
+        let ch = DiscordChannelInfo {
+            id: "ch_id".into(),
+            channel_type: 0,
+            parent_id: None,
+        };
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("ch_id"), Some(&ch));
+        assert_eq!(channel_id, "ch_id");
+        assert!(thread_id.is_none());
+    }
+
+    #[test]
+    fn test_resolve_public_thread() {
+        // Type 11 = GUILD_PUBLIC_THREAD — thread binding should activate.
+        let ch = DiscordChannelInfo {
+            id: "thread_id".into(),
+            channel_type: 11,
+            parent_id: Some("parent_channel".into()),
+        };
+        let (channel_id, thread_id) =
+            resolve_channel_and_thread(Some("thread_id"), Some(&ch));
+        // channel_id should be the parent, thread_id should be the thread itself
+        assert_eq!(channel_id, "parent_channel");
+        assert_eq!(thread_id.as_deref(), Some("thread_id"));
+    }
+
+    #[test]
+    fn test_resolve_private_thread() {
+        // Type 12 = GUILD_PRIVATE_THREAD
+        let ch = DiscordChannelInfo {
+            id: "priv_thread".into(),
+            channel_type: 12,
+            parent_id: Some("news_channel".into()),
+        };
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("priv_thread"), Some(&ch));
+        assert_eq!(channel_id, "news_channel");
+        assert_eq!(thread_id.as_deref(), Some("priv_thread"));
+    }
+
+    #[test]
+    fn test_resolve_announcement_thread() {
+        // Type 10 = GUILD_NEWS_THREAD
+        let ch = DiscordChannelInfo {
+            id: "news_thread".into(),
+            channel_type: 10,
+            parent_id: Some("announce_ch".into()),
+        };
+        let (channel_id, thread_id) =
+            resolve_channel_and_thread(Some("news_thread"), Some(&ch));
+        assert_eq!(channel_id, "announce_ch");
+        assert_eq!(thread_id.as_deref(), Some("news_thread"));
+    }
+
+    #[test]
+    fn test_resolve_thread_without_parent_id_falls_back_to_channel_id() {
+        // Malformed payload: thread type but no parent_id — fall back to fallback_channel_id.
+        let ch = DiscordChannelInfo {
+            id: "thread_id".into(),
+            channel_type: 11,
+            parent_id: None,
+        };
+        let (channel_id, thread_id) =
+            resolve_channel_and_thread(Some("fallback_ch"), Some(&ch));
+        assert_eq!(channel_id, "fallback_ch");
+        assert_eq!(thread_id.as_deref(), Some("thread_id"));
+    }
+
+    #[test]
+    fn test_resolve_no_channel_info() {
+        // No channel object in payload — plain channel routing.
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("plain_ch"), None);
+        assert_eq!(channel_id, "plain_ch");
+        assert!(thread_id.is_none());
+    }
+
+    #[test]
+    fn test_is_thread() {
+        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 10, parent_id: None }.is_thread());
+        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 11, parent_id: None }.is_thread());
+        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 12, parent_id: None }.is_thread());
+        assert!(!DiscordChannelInfo { id: "x".into(), channel_type: 0, parent_id: None }.is_thread());
+        assert!(!DiscordChannelInfo { id: "x".into(), channel_type: 5, parent_id: None }.is_thread());
     }
 }
