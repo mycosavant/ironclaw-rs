@@ -249,6 +249,60 @@ impl Tool for MediaInfoTool {
 
 // ── ImageResizeTool ───────────────────────────────────────────────────────────
 
+/// Per-agent image resize dimension configuration, read from environment variables.
+///
+/// | Variable                       | Default | Description                                              |
+/// |--------------------------------|---------|----------------------------------------------------------|
+/// | `IMAGE_RESIZE_DEFAULT_WIDTH`   | —       | Target width when the call omits both `width` and `height` |
+/// | `IMAGE_RESIZE_DEFAULT_HEIGHT`  | —       | Target height when the call omits both `width` and `height` |
+/// | `IMAGE_MAX_WIDTH`              | 65535   | Hard ceiling on output width in pixels                   |
+/// | `IMAGE_MAX_HEIGHT`             | 65535   | Hard ceiling on output height in pixels                  |
+///
+/// When both `IMAGE_RESIZE_DEFAULT_WIDTH` and `IMAGE_RESIZE_DEFAULT_HEIGHT` are set,
+/// both are applied as explicit targets (aspect ratio not preserved). When only one is
+/// set, the other is computed from the source aspect ratio. Max values cap even
+/// explicit caller-provided dimensions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageResizeConfig {
+    /// Default target width when neither `width` nor `height` is given by the caller.
+    pub default_width: Option<u32>,
+    /// Default target height when neither `width` nor `height` is given by the caller.
+    pub default_height: Option<u32>,
+    /// Maximum permitted output width. Caller values are clamped to this.
+    pub max_width: u32,
+    /// Maximum permitted output height. Caller values are clamped to this.
+    pub max_height: u32,
+}
+
+impl Default for ImageResizeConfig {
+    fn default() -> Self {
+        Self {
+            default_width: None,
+            default_height: None,
+            max_width: 65535,
+            max_height: 65535,
+        }
+    }
+}
+
+/// Read [`ImageResizeConfig`] from environment variables.
+///
+/// Values of `0` and non-integer strings are silently ignored, preserving defaults.
+pub(crate) fn image_resize_config() -> ImageResizeConfig {
+    let parse = |var: &str| -> Option<u32> {
+        std::env::var(var)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&n| n >= 1)
+    };
+    ImageResizeConfig {
+        default_width: parse("IMAGE_RESIZE_DEFAULT_WIDTH"),
+        default_height: parse("IMAGE_RESIZE_DEFAULT_HEIGHT"),
+        max_width: parse("IMAGE_MAX_WIDTH").unwrap_or(65535),
+        max_height: parse("IMAGE_MAX_HEIGHT").unwrap_or(65535),
+    }
+}
+
 /// Resize an image to new dimensions, preserving aspect ratio by default.
 ///
 /// Uses Lanczos3 resampling for high-quality downscaling and upscaling.
@@ -349,11 +403,10 @@ impl Tool for ImageResizeTool {
                 .map(|n| n.clamp(1, 100) as u8)
                 .unwrap_or(85);
 
-            if target_width.is_none() && target_height.is_none() {
-                return Err(ToolError::InvalidParameters(
-                    "at least one of 'width' or 'height' must be provided".into(),
-                ));
-            }
+            // Apply configurable defaults and max-dimension ceilings.
+            let cfg = image_resize_config();
+            let (target_width, target_height) =
+                resolve_target_dims(target_width, target_height, &cfg)?;
 
             let filter = match params
                 .get("filter")
@@ -921,6 +974,38 @@ fn compute_dimensions(
     }
 }
 
+/// Resolve final `(target_width, target_height)` considering configured defaults and max limits.
+///
+/// 1. If neither dimension was provided by the caller, fall back to
+///    `IMAGE_RESIZE_DEFAULT_WIDTH` / `IMAGE_RESIZE_DEFAULT_HEIGHT`.
+/// 2. If still no dimension is known, return an error.
+/// 3. Clamp any non-`None` dimension to the configured max.
+#[cfg(feature = "media")]
+fn resolve_target_dims(
+    caller_w: Option<u32>,
+    caller_h: Option<u32>,
+    cfg: &ImageResizeConfig,
+) -> Result<(Option<u32>, Option<u32>), ToolError> {
+    let (w, h) = match (caller_w, caller_h) {
+        (None, None) => {
+            // Caller provided no dimensions — use configured defaults.
+            if cfg.default_width.is_none() && cfg.default_height.is_none() {
+                return Err(ToolError::InvalidParameters(
+                    "at least one of 'width' or 'height' must be provided \
+                     (or set IMAGE_RESIZE_DEFAULT_WIDTH / IMAGE_RESIZE_DEFAULT_HEIGHT)"
+                        .into(),
+                ));
+            }
+            (cfg.default_width, cfg.default_height)
+        }
+        (w, h) => (w, h),
+    };
+    // Apply max-dimension ceilings.
+    let w = w.map(|n| n.min(cfg.max_width));
+    let h = h.map(|n| n.min(cfg.max_height));
+    Ok((w, h))
+}
+
 /// Save a `DynamicImage` to `path`, honouring quality for lossy formats.
 #[cfg(feature = "media")]
 fn save_image_with_quality(
@@ -1123,6 +1208,111 @@ mod tests {
         let (w, h) = compute_dimensions(800, 400, None, Some(200));
         assert_eq!(w, 400);
         assert_eq!(h, 200);
+    }
+
+    // ---- resolve_target_dims / ImageResizeConfig ────────────────────────────
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_caller_width_only() {
+        let cfg = ImageResizeConfig::default();
+        let (w, h) = resolve_target_dims(Some(800), None, &cfg).unwrap();
+        assert_eq!(w, Some(800));
+        assert!(h.is_none());
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_caller_both_dims() {
+        let cfg = ImageResizeConfig::default();
+        let (w, h) = resolve_target_dims(Some(1920), Some(1080), &cfg).unwrap();
+        assert_eq!(w, Some(1920));
+        assert_eq!(h, Some(1080));
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_no_caller_no_defaults_errors() {
+        let cfg = ImageResizeConfig::default();
+        let result = resolve_target_dims(None, None, &cfg);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("IMAGE_RESIZE_DEFAULT_WIDTH"),
+            "error should mention env var: {msg}"
+        );
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_no_caller_uses_default_width() {
+        let cfg = ImageResizeConfig {
+            default_width: Some(640),
+            ..ImageResizeConfig::default()
+        };
+        let (w, h) = resolve_target_dims(None, None, &cfg).unwrap();
+        assert_eq!(w, Some(640));
+        assert!(h.is_none()); // height computed from ratio later
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_no_caller_uses_both_defaults() {
+        let cfg = ImageResizeConfig {
+            default_width: Some(120),
+            default_height: Some(120),
+            ..ImageResizeConfig::default()
+        };
+        let (w, h) = resolve_target_dims(None, None, &cfg).unwrap();
+        assert_eq!(w, Some(120));
+        assert_eq!(h, Some(120));
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_clamped_to_max_width() {
+        let cfg = ImageResizeConfig {
+            max_width: 1920,
+            ..ImageResizeConfig::default()
+        };
+        let (w, _h) = resolve_target_dims(Some(4096), Some(2160), &cfg).unwrap();
+        assert_eq!(w, Some(1920)); // clamped
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_clamped_to_max_height() {
+        let cfg = ImageResizeConfig {
+            max_height: 1080,
+            ..ImageResizeConfig::default()
+        };
+        let (_w, h) = resolve_target_dims(Some(1920), Some(2160), &cfg).unwrap();
+        assert_eq!(h, Some(1080)); // clamped
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn test_resolve_target_dims_defaults_also_clamped() {
+        // Default exceeds max — should be clamped.
+        let cfg = ImageResizeConfig {
+            default_width: Some(4000),
+            max_width: 1920,
+            ..ImageResizeConfig::default()
+        };
+        let (w, _) = resolve_target_dims(None, None, &cfg).unwrap();
+        assert_eq!(w, Some(1920));
+    }
+
+    #[test]
+    fn test_image_resize_config_defaults() {
+        // Without env vars set, defaults should match the struct defaults.
+        // We can't guarantee a clean env in all test runners, so only check
+        // the invariant that max values are positive.
+        let cfg = ImageResizeConfig::default();
+        assert!(cfg.max_width >= 1);
+        assert!(cfg.max_height >= 1);
+        assert_eq!(cfg.max_width, 65535);
+        assert_eq!(cfg.max_height, 65535);
     }
 
     #[cfg(feature = "media")]

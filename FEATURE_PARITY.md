@@ -249,8 +249,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature                        | OpenClaw | IronClaw | Priority | Notes                                                                                                     |
 | ------------------------------ | -------- | -------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| Image processing (Sharp)       | ✅       | ❌       | P2       | Resize, format convert                                                                                    |
-| Configurable image resize dims | ✅       | ❌       | P2       | Per-agent dimension config                                                                                |
+| Image processing (Sharp)       | ✅       | ✅       | -        | `image_resize` (Lanczos3/triangle/nearest, quality) + `image_convert`; `image` crate          |
+| Configurable image resize dims | ✅       | ✅       | -        | `IMAGE_RESIZE_DEFAULT_WIDTH/HEIGHT` (fallback when no dims given); `IMAGE_MAX_WIDTH/HEIGHT` cap |
 | Multiple images per tool call  | ✅       | ✅       | P2       | `image_analyze` accepts up to 10 images per call (base64 data-URI)                                        |
 | Audio transcription            | ✅       | ✅       | P2       | `audio_transcribe` via OpenAI Whisper API (multipart upload, 25 MiB max)                                  |
 | Video support                  | ✅       | ❌       | P3       |                                                                                                           |
