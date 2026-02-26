@@ -220,7 +220,9 @@ impl ChannelHealthMonitor {
                                 ChannelStatus::Healthy => {}
                                 // Unknown is only an initial placeholder; it is never
                                 // assigned as a `new_status` in the failure branch.
-                                ChannelStatus::Unknown => unreachable!("new_status cannot be Unknown"),
+                                ChannelStatus::Unknown => {
+                                    unreachable!("new_status cannot be Unknown")
+                                }
                             }
                         } else {
                             // Same state — periodic log at lower severity.

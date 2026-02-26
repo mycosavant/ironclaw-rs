@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 
-
 // ── Multi-modal content types ─────────────────────────────────────────────────
 
 /// Image URL descriptor for multi-modal messages.
@@ -31,13 +30,9 @@ pub struct ImageUrl {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     /// Plain text segment.
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// An image, identified by URL or inline data-URI.
-    ImageUrl {
-        image_url: ImageUrl,
-    },
+    ImageUrl { image_url: ImageUrl },
 }
 
 impl ContentPart {
@@ -61,10 +56,7 @@ impl ContentPart {
             url
         );
         ContentPart::ImageUrl {
-            image_url: ImageUrl {
-                url,
-                detail: None,
-            },
+            image_url: ImageUrl { url, detail: None },
         }
     }
 

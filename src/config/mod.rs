@@ -36,6 +36,7 @@ pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig};
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
+pub use self::hot_reload::{ConfigReloadEvent, ConfigWatcher, HotReloadConfig};
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
@@ -48,7 +49,6 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
-pub use self::hot_reload::{ConfigReloadEvent, ConfigWatcher, HotReloadConfig};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///

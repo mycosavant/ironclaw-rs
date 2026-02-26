@@ -30,29 +30,29 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 2. Gateway System
 
-| Feature                             | OpenClaw | IronClaw | Notes                                                                               |
-| ----------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------- |
-| Gateway control plane               | ✅       | ✅       | Web gateway with 40+ API endpoints                                                  |
-| HTTP endpoints for Control UI       | ✅       | ✅       | Web dashboard with chat, memory, jobs, logs, extensions                             |
-| Channel connection lifecycle        | ✅       | ✅       | ChannelManager + WebSocket tracker                                                  |
-| Session management/routing          | ✅       | ✅       | SessionManager exists                                                               |
-| Configuration hot-reload            | ✅       | ✅       | `notify` crate; watches `config.toml`, `settings.json`, `.env`; 300ms debounce     |
-| Network modes (loopback/LAN/remote) | ✅       | 🚧       | HTTP only                                                                           |
-| OpenAI-compatible HTTP API          | ✅       | ✅       | /v1/chat/completions, per-request `model` override                                  |
-| Canvas hosting                      | ✅       | ❌       | Agent-driven UI                                                                     |
-| Gateway lock (PID-based)            | ✅       | ❌       |                                                                                     |
-| launchd/systemd integration         | ✅       | ❌       |                                                                                     |
-| Bonjour/mDNS discovery              | ✅       | ❌       |                                                                                     |
-| Tailscale integration               | ✅       | ❌       |                                                                                     |
-| Health check endpoints              | ✅       | ✅       | /api/health + /api/gateway/status                                                   |
-| `doctor` diagnostics                | ✅       | ✅       |                                                                                     |
-| Agent event broadcast               | ✅       | 🚧       | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
+| Feature                             | OpenClaw | IronClaw | Notes                                                                                  |
+| ----------------------------------- | -------- | -------- | -------------------------------------------------------------------------------------- |
+| Gateway control plane               | ✅       | ✅       | Web gateway with 40+ API endpoints                                                     |
+| HTTP endpoints for Control UI       | ✅       | ✅       | Web dashboard with chat, memory, jobs, logs, extensions                                |
+| Channel connection lifecycle        | ✅       | ✅       | ChannelManager + WebSocket tracker                                                     |
+| Session management/routing          | ✅       | ✅       | SessionManager exists                                                                  |
+| Configuration hot-reload            | ✅       | ✅       | `notify` crate; watches `config.toml`, `settings.json`, `.env`; 300ms debounce         |
+| Network modes (loopback/LAN/remote) | ✅       | 🚧       | HTTP only                                                                              |
+| OpenAI-compatible HTTP API          | ✅       | ✅       | /v1/chat/completions, per-request `model` override                                     |
+| Canvas hosting                      | ✅       | ❌       | Agent-driven UI                                                                        |
+| Gateway lock (PID-based)            | ✅       | ❌       |                                                                                        |
+| launchd/systemd integration         | ✅       | ❌       |                                                                                        |
+| Bonjour/mDNS discovery              | ✅       | ❌       |                                                                                        |
+| Tailscale integration               | ✅       | ❌       |                                                                                        |
+| Health check endpoints              | ✅       | ✅       | /api/health + /api/gateway/status                                                      |
+| `doctor` diagnostics                | ✅       | ✅       |                                                                                        |
+| Agent event broadcast               | ✅       | 🚧       | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired    |
 | Channel health monitor              | ✅       | ✅       | 3-state FSM (Healthy/Degraded/Failed); configurable thresholds; notifications injected |
-| Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                      |
-| Trusted-proxy auth mode             | ✅       | ❌       | Header-based auth for reverse proxies                                               |
-| APNs push pipeline                  | ✅       | ❌       | Wake disconnected iOS nodes via push                                                |
-| Oversized payload guard             | ✅       | 🚧       | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap        |
-| Pre-prompt context diagnostics      | ✅       | ❌       | Context size logging before prompt                                                  |
+| Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                         |
+| Trusted-proxy auth mode             | ✅       | ❌       | Header-based auth for reverse proxies                                                  |
+| APNs push pipeline                  | ✅       | ❌       | Wake disconnected iOS nodes via push                                                   |
+| Oversized payload guard             | ✅       | 🚧       | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap           |
+| Pre-prompt context diagnostics      | ✅       | ❌       | Context size logging before prompt                                                     |
 
 ### Owner: _Unassigned_
 
@@ -269,23 +269,23 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 8. Plugin & Extension System
 
-| Feature                        | OpenClaw | IronClaw | Notes                                         |
-| ------------------------------ | -------- | -------- | --------------------------------------------- |
-| Dynamic loading                | ✅       | ✅       | WASM modules                                  |
-| Manifest validation            | ✅       | ✅       | WASM metadata                                 |
-| HTTP path registration         | ✅       | ❌       | Plugin routes                                 |
-| Workspace-relative install     | ✅       | ✅       | ~/.ironclaw/tools/                            |
-| Channel plugins                | ✅       | ✅       | WASM channels                                 |
-| Auth plugins                   | ✅       | ❌       |                                               |
-| Memory plugins                 | ✅       | ❌       | Custom backends                               |
-| Tool plugins                   | ✅       | ✅       | WASM tools                                    |
-| Hook plugins                   | ✅       | ✅       | Declarative hooks from extension capabilities |
-| Provider plugins               | ✅       | ❌       |                                               |
-| Plugin CLI (`install`, `list`) | ✅       | ✅       | `tool` subcommand                             |
-| ClawHub registry               | ✅       | ❌       | Discovery                                     |
-| `before_agent_start` hook      | ✅       | ✅       | Fires before main loop; model/provider override logged                |
+| Feature                        | OpenClaw | IronClaw | Notes                                                                    |
+| ------------------------------ | -------- | -------- | ------------------------------------------------------------------------ |
+| Dynamic loading                | ✅       | ✅       | WASM modules                                                             |
+| Manifest validation            | ✅       | ✅       | WASM metadata                                                            |
+| HTTP path registration         | ✅       | ❌       | Plugin routes                                                            |
+| Workspace-relative install     | ✅       | ✅       | ~/.ironclaw/tools/                                                       |
+| Channel plugins                | ✅       | ✅       | WASM channels                                                            |
+| Auth plugins                   | ✅       | ❌       |                                                                          |
+| Memory plugins                 | ✅       | ❌       | Custom backends                                                          |
+| Tool plugins                   | ✅       | ✅       | WASM tools                                                               |
+| Hook plugins                   | ✅       | ✅       | Declarative hooks from extension capabilities                            |
+| Provider plugins               | ✅       | ❌       |                                                                          |
+| Plugin CLI (`install`, `list`) | ✅       | ✅       | `tool` subcommand                                                        |
+| ClawHub registry               | ✅       | ❌       | Discovery                                                                |
+| `before_agent_start` hook      | ✅       | ✅       | Fires before main loop; model/provider override logged                   |
 | `before_message_write` hook    | ✅       | ✅       | Fires before user/assistant persist; hook can suppress or modify content |
-| `llm_input`/`llm_output` hooks | ✅       | ❌       | LLM payload inspection                        |
+| `llm_input`/`llm_output` hooks | ✅       | ❌       | LLM payload inspection                                                   |
 
 ### Owner: _Unassigned_
 
@@ -403,31 +403,31 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 14. Automation
 
-| Feature                        | OpenClaw | IronClaw | Priority | Notes                                      |
-| ------------------------------ | -------- | -------- | -------- | ------------------------------------------ |
-| Cron jobs                      | ✅       | ✅       | -        | Routines with cron trigger                 |
-| Cron stagger controls          | ✅       | ❌       | P3       | Default stagger for scheduled jobs         |
-| Cron finished-run webhook      | ✅       | ❌       | P3       | Webhook on job completion                  |
-| Timezone support               | ✅       | ✅       | -        | Via cron expressions                       |
-| One-shot/recurring jobs        | ✅       | ✅       | -        | Manual + cron triggers                     |
-| Channel health monitor         | ✅       | ✅       | P2       | 3-state FSM; configurable thresholds; injected notifications        |
-| `beforeInbound` hook           | ✅       | ✅       | P2       |                                            |
-| `beforeOutbound` hook          | ✅       | ✅       | P2       |                                            |
-| `beforeToolCall` hook          | ✅       | ✅       | P2       |                                            |
-| `before_agent_start` hook      | ✅       | ✅       | P2       | Fires before main loop; model/provider override logged              |
-| `before_message_write` hook    | ✅       | ✅       | P2       | Fires before persist; hook can suppress or modify content           |
-| `onMessage` hook               | ✅       | ✅       | -        | Routines with event trigger                |
-| `onSessionStart` hook          | ✅       | ✅       | P2       |                                            |
-| `onSessionEnd` hook            | ✅       | ✅       | P2       |                                            |
-| `transcribeAudio` hook         | ✅       | ❌       | P3       |                                            |
-| `transformResponse` hook       | ✅       | ✅       | P2       |                                            |
-| `llm_input`/`llm_output` hooks | ✅       | ❌       | P3       | LLM payload inspection                     |
-| Bundled hooks                  | ✅       | ✅       | P2       | Audit + declarative rule/webhook hooks     |
-| Plugin hooks                   | ✅       | ✅       | P3       | Registered from WASM `capabilities.json`   |
-| Workspace hooks                | ✅       | ✅       | P2       | `hooks/hooks.json` and `hooks/*.hook.json` |
-| Outbound webhooks              | ✅       | ✅       | P2       | Fire-and-forget lifecycle event delivery   |
-| Heartbeat system               | ✅       | ✅       | -        | Periodic execution                         |
-| Gmail pub/sub                  | ✅       | ❌       | P3       |                                            |
+| Feature                        | OpenClaw | IronClaw | Priority | Notes                                                        |
+| ------------------------------ | -------- | -------- | -------- | ------------------------------------------------------------ |
+| Cron jobs                      | ✅       | ✅       | -        | Routines with cron trigger                                   |
+| Cron stagger controls          | ✅       | ❌       | P3       | Default stagger for scheduled jobs                           |
+| Cron finished-run webhook      | ✅       | ❌       | P3       | Webhook on job completion                                    |
+| Timezone support               | ✅       | ✅       | -        | Via cron expressions                                         |
+| One-shot/recurring jobs        | ✅       | ✅       | -        | Manual + cron triggers                                       |
+| Channel health monitor         | ✅       | ✅       | P2       | 3-state FSM; configurable thresholds; injected notifications |
+| `beforeInbound` hook           | ✅       | ✅       | P2       |                                                              |
+| `beforeOutbound` hook          | ✅       | ✅       | P2       |                                                              |
+| `beforeToolCall` hook          | ✅       | ✅       | P2       |                                                              |
+| `before_agent_start` hook      | ✅       | ✅       | P2       | Fires before main loop; model/provider override logged       |
+| `before_message_write` hook    | ✅       | ✅       | P2       | Fires before persist; hook can suppress or modify content    |
+| `onMessage` hook               | ✅       | ✅       | -        | Routines with event trigger                                  |
+| `onSessionStart` hook          | ✅       | ✅       | P2       |                                                              |
+| `onSessionEnd` hook            | ✅       | ✅       | P2       |                                                              |
+| `transcribeAudio` hook         | ✅       | ❌       | P3       |                                                              |
+| `transformResponse` hook       | ✅       | ✅       | P2       |                                                              |
+| `llm_input`/`llm_output` hooks | ✅       | ❌       | P3       | LLM payload inspection                                       |
+| Bundled hooks                  | ✅       | ✅       | P2       | Audit + declarative rule/webhook hooks                       |
+| Plugin hooks                   | ✅       | ✅       | P3       | Registered from WASM `capabilities.json`                     |
+| Workspace hooks                | ✅       | ✅       | P2       | `hooks/hooks.json` and `hooks/*.hook.json`                   |
+| Outbound webhooks              | ✅       | ✅       | P2       | Fire-and-forget lifecycle event delivery                     |
+| Heartbeat system               | ✅       | ✅       | -        | Periodic execution                                           |
+| Gmail pub/sub                  | ✅       | ❌       | P3       |                                                              |
 
 ### Owner: _Unassigned_
 
