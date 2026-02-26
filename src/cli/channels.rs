@@ -230,8 +230,8 @@ async fn install_channel(
     });
 
     // Copy WASM file
-    println!("Installing '{}' → {}", channel_name, target_wasm.display());
-    fs::copy(&wasm_path, &target_wasm)
+    println!("Installing '{}' → {}", channel_name, target_wasm.display());    // Validate the source is actually a WASM binary before copying.
+    validate_wasm_magic(&wasm_path).await?;    fs::copy(&wasm_path, &target_wasm)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to copy WASM file: {}", e))?;
 
@@ -241,8 +241,8 @@ async fn install_channel(
         fs::copy(caps, &target_caps).await?;
         println!("  Capabilities: {}", target_caps.display());
     } else {
-        println!("  Warning: No capabilities file found. Channel will have no permissions.");
-        println!("  Provide one with --caps <path> or place it adjacent to the .wasm.");
+        eprintln!("  Warning: No capabilities file found. Channel will have no permissions.");
+        eprintln!("  Provide one with --caps <path> or place it adjacent to the .wasm.");
     }
 
     let wasm_bytes = fs::read(&target_wasm).await?;
@@ -319,7 +319,6 @@ async fn channel_status(
     }
 
     // ── Gateway live status ───────────────────────────────────────────────────
-    let _ = dotenvy::dotenv();
     let base_url = resolve_gateway_url(gateway)?;
     let auth_token = resolve_gateway_token(token);
 
@@ -436,13 +435,9 @@ async fn resolve_wasm_source(path: &Path) -> anyhow::Result<(PathBuf, Option<Pat
                 }
                 if wasm_files.len() == 1 {
                     let wasm = wasm_files.remove(0);
-                    // Look for adjacent capabilities file
-                    let caps = path.join(format!(
-                        "{}.capabilities.json",
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("channel")
-                    ));
+                    // Look for a capabilities file adjacent to the discovered .wasm
+                    // (using the wasm file's own stem, not the outer directory name).
+                    let caps = wasm.with_extension("capabilities.json");
                     let caps_opt = caps.exists().then_some(caps);
                     return Ok((wasm, caps_opt));
                 } else if wasm_files.len() > 1 {
@@ -473,6 +468,26 @@ async fn validate_capabilities(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate the first 4 bytes are the WebAssembly magic number (`\0asm`).
+async fn validate_wasm_magic(path: &Path) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot open {}: {}", path.display(), e))?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)
+        .await
+        .map_err(|_| anyhow::anyhow!("{} is too small to be a valid WASM file", path.display()))?;
+    if magic != [0x00, 0x61, 0x73, 0x6D] {
+        anyhow::bail!(
+            "{} does not appear to be a WebAssembly binary (bad magic: {:02x?})",
+            path.display(),
+            magic
+        );
+    }
+    Ok(())
+}
+
 /// Collect WASM files from `dir`, returning `(name, path, has_caps, size)`.
 async fn collect_channels(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf, bool, u64)>> {
     let mut channels = Vec::new();
@@ -490,7 +505,9 @@ async fn collect_channels(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf, bo
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let has_caps = path.with_extension("capabilities.json").exists();
+            // Use async try_exists to avoid blocking the tokio thread.
+            let caps_path = path.with_extension("capabilities.json");
+            let has_caps = fs::try_exists(&caps_path).await.unwrap_or(false);
             let size = fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
             channels.push((name, path, has_caps, size));
         }

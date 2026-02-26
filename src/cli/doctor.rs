@@ -278,12 +278,16 @@ async fn check_llm_reachable() -> CheckResult {
 
     // Probe TCP reachability only — no auth, no real LLM call that incurs cost.
     // Any HTTP-level response (4xx, 5xx) means the host is reachable.
+    // Network-level errors (connect refused, DNS failure, timeout) are failures.
     match client.get(&base_url).send().await {
         Ok(_) => CheckResult::Pass(format!("{base_url} reachable")),
         Err(e) if e.is_connect() || e.is_timeout() => {
             CheckResult::Fail(format!("{base_url} unreachable: {e}"))
         }
-        Err(_) => CheckResult::Pass(format!("{base_url} reachable")),
+        Err(e) => {
+            // DNS failure, TLS error, etc. — the host is not reachable
+            CheckResult::Fail(format!("{base_url} unreachable: {e}"))
+        }
     }
 }
 

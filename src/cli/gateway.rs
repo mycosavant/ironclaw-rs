@@ -215,7 +215,7 @@ async fn logs(
     let auth_token = resolve_token(token)?;
 
     // Normalise level to uppercase for comparison
-    let min_level = parse_log_level(&level);
+    let min_level = log_level_value(&level.to_uppercase());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(if follow { 0 } else { 90 })) // 0 = no timeout when following
@@ -257,7 +257,12 @@ async fn logs(
         Some(tokio::time::Instant::now() + Duration::from_secs(60))
     };
 
-    let mut buf = String::new();
+    // SSE line accumulator.  We keep a byte vec and drain complete \n-terminated
+    // lines from the front, avoiding the O(n²) re-allocation of slicing + to_string.
+    // A hard 64 KiB cap on a single buffered line guards against a runaway gateway.
+    const MAX_LINE_BYTES: usize = 64 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+
     loop {
         // Check deadline before reading
         if let Some(d) = deadline {
@@ -269,12 +274,18 @@ async fn logs(
 
         let chunk = resp.chunk().await?;
         let Some(bytes) = chunk else { break };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.extend_from_slice(&bytes);
 
-        // Drain complete lines from the buffer
-        while let Some(nl) = buf.find('\n') {
-            let line: String = buf[..nl].trim_end_matches('\r').to_string();
-            buf = buf[nl + 1..].to_string();
+        // Drain complete lines from the front of the buffer.
+        while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+            // Extract the line and remove trailing \r if present (CRLF).
+            let end = if nl > 0 && buf[nl - 1] == b'\r' {
+                nl - 1
+            } else {
+                nl
+            };
+            let line = String::from_utf8_lossy(&buf[..end]).into_owned();
+            buf.drain(..nl + 1);
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
@@ -294,6 +305,13 @@ async fn logs(
                     println!("{}", data);
                 }
             }
+        }
+
+        // Guard: if no newline arrived and buffer exceeds the cap, the gateway
+        // sent a pathologically long line — skip it to avoid memory exhaustion.
+        if buf.len() > MAX_LINE_BYTES {
+            eprintln!("[warn] Oversized SSE line ({} bytes) — skipping", buf.len());
+            buf.clear();
         }
     }
 
@@ -429,28 +447,26 @@ fn resolve_gateway_url(override_url: Option<String>) -> anyhow::Result<String> {
 
 fn resolve_token(override_token: Option<String>) -> anyhow::Result<String> {
     if let Some(t) = override_token {
-        return Ok(t);
+        return Ok(t.trim().to_string());
     }
-    std::env::var("GATEWAY_AUTH_TOKEN").map_err(|_| {
-        anyhow::anyhow!("No auth token provided. Set GATEWAY_AUTH_TOKEN or pass --token.")
-    })
+    std::env::var("GATEWAY_AUTH_TOKEN")
+        .map(|t| t.trim().to_string())
+        .map_err(|_| {
+            anyhow::anyhow!("No auth token provided. Set GATEWAY_AUTH_TOKEN or pass --token.")
+        })
 }
 
-/// Convert level string to a numeric priority (higher = more severe).
+/// Convert a log level string to a numeric priority (higher = more severe).
+/// Accepts both upper and lower case; unknown levels default to INFO (2).
 fn log_level_value(level: &str) -> u8 {
     match level.to_uppercase().as_str() {
         "TRACE" => 0,
         "DEBUG" => 1,
         "INFO" => 2,
-        "WARN" => 3,
-        "WARNING" => 3,
+        "WARN" | "WARNING" => 3,
         "ERROR" => 4,
         _ => 2,
     }
-}
-
-fn parse_log_level(level: &str) -> u8 {
-    log_level_value(level)
 }
 
 fn format_duration(secs: u64) -> String {
