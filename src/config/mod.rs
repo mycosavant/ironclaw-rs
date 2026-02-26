@@ -12,6 +12,7 @@ mod database;
 mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
+pub mod hot_reload;
 mod hygiene;
 mod llm;
 mod routines;
@@ -47,6 +48,7 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use self::hot_reload::{ConfigReloadEvent, ConfigWatcher, HotReloadConfig};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///

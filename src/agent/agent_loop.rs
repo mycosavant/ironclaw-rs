@@ -23,7 +23,7 @@ use crate::channels::{
     ChannelHealthMonitor, ChannelManager, HealthMonitorConfig, IncomingMessage, OutgoingResponse,
     StatusUpdate,
 };
-use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
+use crate::config::{AgentConfig, ConfigWatcher, HeartbeatConfig, HotReloadConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
@@ -237,6 +237,35 @@ impl Agent {
             HealthMonitorConfig::default(),
         )
         .spawn();
+
+        // Spawn config hot-reload watcher — detects changes to config.toml /
+        // settings.json and injects a system notification so the operator knows to
+        // restart (or, for live-reloadable settings, the reload handler fires).
+        let _config_watcher = match ConfigWatcher::new(HotReloadConfig::default()) {
+            Ok((watcher, mut reload_rx)) => {
+                let inject = self.channels.inject_sender();
+                let agent_name = self.config.name.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = reload_rx.recv().await {
+                        let path_display = event.path.display().to_string();
+                        tracing::info!(path = %path_display, "Config file changed — some settings require a restart to take effect");
+                        let msg = IncomingMessage::new(
+                            "system",
+                            &agent_name,
+                            format!("[config] File changed: {}  (restart may be needed to apply changes)", path_display),
+                        );
+                        if inject.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Some(watcher.spawn())
+            }
+            Err(e) => {
+                tracing::warn!("Config hot-reload unavailable (file watch init failed): {}", e);
+                None
+            }
+        };
 
         // Start self-repair task with notification forwarding
         let repair = Arc::new(DefaultSelfRepair::new(
