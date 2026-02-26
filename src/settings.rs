@@ -310,6 +310,11 @@ pub struct AgentSettings {
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     #[serde(default)]
     pub auto_approve_tools: bool,
+
+    /// When true, tool errors in SSE broadcasts and log events use a generic
+    /// message instead of the raw error.
+    #[serde(default)]
+    pub suppress_tool_errors: bool,
 }
 
 fn default_agent_name() -> String {
@@ -361,6 +366,7 @@ impl Default for AgentSettings {
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
+            suppress_tool_errors: false,
         }
     }
 }

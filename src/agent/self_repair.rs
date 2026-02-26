@@ -1,7 +1,8 @@
 //! Self-repair for stuck jobs and broken tools.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -66,8 +67,7 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
-    #[allow(dead_code)]
+    /// Jobs must be stuck longer than this duration before repair is attempted.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
     store: Option<Arc<dyn Database>>,
@@ -132,6 +132,11 @@ impl SelfRepair for DefaultSelfRepair {
                         Duration::from_secs(duration.num_seconds().max(0) as u64)
                     })
                     .unwrap_or_default();
+
+                // Only consider a job stuck if it has exceeded the threshold.
+                if stuck_duration < self.stuck_threshold {
+                    continue;
+                }
 
                 stuck_jobs.push(StuckJob {
                     job_id,
@@ -311,10 +316,18 @@ impl SelfRepair for DefaultSelfRepair {
     }
 }
 
+/// Maximum backoff delay for repair retries (10 minutes).
+const MAX_BACKOFF: Duration = Duration::from_secs(600);
+
 /// Background repair task that periodically checks for and repairs issues.
+///
+/// Uses per-job exponential backoff to avoid hammering the same stuck job
+/// with rapid repair attempts.
 pub struct RepairTask {
     repair: Arc<dyn SelfRepair>,
     check_interval: Duration,
+    /// Per-job backoff state: attempt count and earliest next retry time.
+    backoff: HashMap<Uuid, (u32, Instant)>,
 }
 
 impl RepairTask {
@@ -323,36 +336,78 @@ impl RepairTask {
         Self {
             repair,
             check_interval,
+            backoff: HashMap::new(),
         }
     }
 
+    /// Calculate the next retry delay using exponential backoff.
+    fn next_backoff(attempt: u32, base: Duration) -> Duration {
+        let multiplier = 2u64.saturating_pow(attempt);
+        let delay = base.saturating_mul(multiplier as u32);
+        delay.min(MAX_BACKOFF)
+    }
+
     /// Run the repair task.
-    pub async fn run(&self) {
+    pub async fn run(&mut self) {
         loop {
             tokio::time::sleep(self.check_interval).await;
 
             // Check for stuck jobs
             let stuck_jobs = self.repair.detect_stuck_jobs().await;
-            for job in stuck_jobs {
+
+            // Collect current stuck job IDs for cleanup.
+            let stuck_ids: std::collections::HashSet<Uuid> =
+                stuck_jobs.iter().map(|j| j.job_id).collect();
+
+            for job in &stuck_jobs {
+                // Check backoff: skip if too early to retry this job.
+                if let Some(&(_, next_retry)) = self.backoff.get(&job.job_id)
+                    && Instant::now() < next_retry
+                {
+                    tracing::debug!(
+                        job_id = %job.job_id,
+                        "Skipping repair — backoff not elapsed"
+                    );
+                    continue;
+                }
+
                 tracing::info!("Attempting to repair stuck job {}", job.job_id);
-                match self.repair.repair_stuck_job(&job).await {
+                let attempt = self.backoff.get(&job.job_id).map(|(a, _)| *a).unwrap_or(0);
+
+                match self.repair.repair_stuck_job(job).await {
                     Ok(RepairResult::Success { message }) => {
                         tracing::info!("Repair succeeded: {}", message);
+                        // Clear backoff on success.
+                        self.backoff.remove(&job.job_id);
                     }
                     Ok(RepairResult::Retry { message }) => {
                         tracing::warn!("Repair needs retry: {}", message);
+                        let next_attempt = attempt + 1;
+                        let delay = Self::next_backoff(next_attempt, self.check_interval);
+                        self.backoff
+                            .insert(job.job_id, (next_attempt, Instant::now() + delay));
                     }
                     Ok(RepairResult::Failed { message }) => {
                         tracing::error!("Repair failed: {}", message);
+                        self.backoff.remove(&job.job_id);
                     }
                     Ok(RepairResult::ManualRequired { message }) => {
                         tracing::warn!("Manual intervention needed: {}", message);
+                        // No further retries needed.
+                        self.backoff.remove(&job.job_id);
                     }
                     Err(e) => {
                         tracing::error!("Repair error: {}", e);
+                        let next_attempt = attempt + 1;
+                        let delay = Self::next_backoff(next_attempt, self.check_interval);
+                        self.backoff
+                            .insert(job.job_id, (next_attempt, Instant::now() + delay));
                     }
                 }
             }
+
+            // Clean up backoff entries for jobs that are no longer stuck.
+            self.backoff.retain(|id, _| stuck_ids.contains(id));
 
             // Check for broken tools
             let broken_tools = self.repair.detect_broken_tools().await;

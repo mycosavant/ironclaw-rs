@@ -226,6 +226,10 @@ impl Agent {
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
                     m.insert("thread_id".to_string(), thread_id.to_string());
+                    m.insert("sender_id".to_string(), message.user_id.clone());
+                    if let Some(ref name) = message.user_name {
+                        m.insert("sender_name".to_string(), name.clone());
+                    }
                     m
                 });
             context.force_text = force_text;
@@ -932,6 +936,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                suppress_tool_errors: false,
             },
             deps,
             Arc::new(ChannelManager::new()),

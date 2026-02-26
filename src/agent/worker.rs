@@ -34,6 +34,8 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
+    /// When true, tool errors in SSE/log events use a generic message.
+    pub suppress_tool_errors: bool,
     /// Broadcast channel for real-time job events to the web gateway.
     pub job_event_tx:
         Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
@@ -837,18 +839,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let user_facing_error = if self.deps.suppress_tool_errors {
+                    "Tool execution failed".to_string()
+                } else {
+                    format!("Error: {e}")
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": format!("Error: {}", e),
+                        "output": user_facing_error,
                     }),
                 );
                 self.broadcast_sse(crate::channels::web::types::SseEvent::JobToolResult {
                     job_id: self.job_id.to_string(),
                     tool_name: selection.tool_name.clone(),
-                    output: format!("Error: {}", e),
+                    output: user_facing_error,
                 });
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
@@ -1152,6 +1159,7 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookRegistry::new()),
             timeout: Duration::from_secs(30),
             use_planning: false,
+            suppress_tool_errors: false,
             job_event_tx: None,
         };
 

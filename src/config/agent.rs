@@ -27,6 +27,10 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// When true, tool errors shown in SSE broadcasts and log events use a
+    /// generic message instead of the raw error. The LLM still receives the
+    /// full error for reasoning. Default: false.
+    pub suppress_tool_errors: bool,
 }
 
 impl AgentConfig {
@@ -68,6 +72,10 @@ impl AgentConfig {
             auto_approve_tools: parse_bool_env(
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
+            )?,
+            suppress_tool_errors: parse_bool_env(
+                "SUPPRESS_TOOL_ERRORS",
+                settings.agent.suppress_tool_errors,
             )?,
         })
     }

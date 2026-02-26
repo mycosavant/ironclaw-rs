@@ -346,6 +346,17 @@ impl Reasoning {
                 .with_tool_choice("auto");
         request.metadata = context.metadata.clone();
 
+        tracing::debug!(
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            chars = request
+                .messages
+                .iter()
+                .map(|m| m.content.len())
+                .sum::<usize>(),
+            "Pre-prompt context: select_tools"
+        );
+
         let response = self.llm.complete_with_tools(request).await?;
 
         let reasoning = response.content.unwrap_or_default();
@@ -462,6 +473,17 @@ Respond in JSON format:
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
 
+            tracing::debug!(
+                messages = request.messages.len(),
+                tools = request.tools.len(),
+                chars = request
+                    .messages
+                    .iter()
+                    .map(|m| m.content.len())
+                    .sum::<usize>(),
+                "Pre-prompt context: respond_with_tools (tool mode)"
+            );
+
             let response = self.llm.complete_with_tools(request).await?;
             let usage = TokenUsage {
                 input_tokens: response.input_tokens,
@@ -527,6 +549,16 @@ Respond in JSON format:
                 .with_max_tokens(4096)
                 .with_temperature(0.7);
             request.metadata = context.metadata.clone();
+
+            tracing::debug!(
+                messages = request.messages.len(),
+                chars = request
+                    .messages
+                    .iter()
+                    .map(|m| m.content.len())
+                    .sum::<usize>(),
+                "Pre-prompt context: respond_with_tools (text mode)"
+            );
 
             let response = self.llm.complete(request).await?;
             let cleaned = clean_response(&response.content);

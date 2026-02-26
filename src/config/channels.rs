@@ -47,7 +47,7 @@ impl ChannelsConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
             Some(HttpConfig {
-                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
+                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: parse_optional_env("HTTP_PORT", 8080)?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),

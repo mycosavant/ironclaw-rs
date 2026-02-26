@@ -281,6 +281,13 @@ impl Agent {
         let repair_channels = self.channels.clone();
         let repair_tick_inner = self.deps.repair_tick.clone();
         let repair_handle = tokio::spawn(async move {
+            /// Maximum backoff delay for repair retries (10 minutes).
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
+
+            // Per-job backoff: attempt count and earliest next retry time.
+            let mut backoff: std::collections::HashMap<uuid::Uuid, (u32, std::time::Instant)> =
+                std::collections::HashMap::new();
+
             loop {
                 tokio::time::sleep(repair_interval).await;
 
@@ -295,12 +302,29 @@ impl Agent {
 
                 // Check stuck jobs
                 let stuck_jobs = repair.detect_stuck_jobs().await;
-                for job in stuck_jobs {
+                let stuck_ids: std::collections::HashSet<uuid::Uuid> =
+                    stuck_jobs.iter().map(|j| j.job_id).collect();
+
+                for job in &stuck_jobs {
+                    // Check backoff: skip if too early to retry this job.
+                    if let Some(&(_, next_retry)) = backoff.get(&job.job_id)
+                        && std::time::Instant::now() < next_retry
+                    {
+                        tracing::debug!(
+                            job_id = %job.job_id,
+                            "Skipping repair — backoff not elapsed"
+                        );
+                        continue;
+                    }
+
+                    let attempt = backoff.get(&job.job_id).map(|(a, _)| *a).unwrap_or(0);
+
                     tracing::info!("Attempting to repair stuck job {}", job.job_id);
-                    let result = repair.repair_stuck_job(&job).await;
+                    let result = repair.repair_stuck_job(job).await;
                     let notification = match &result {
                         Ok(RepairResult::Success { message }) => {
                             tracing::info!("Repair succeeded: {}", message);
+                            backoff.remove(&job.job_id);
                             Some(format!(
                                 "Job {} was stuck for {}s, recovery succeeded: {}",
                                 job.job_id,
@@ -310,6 +334,7 @@ impl Agent {
                         }
                         Ok(RepairResult::Failed { message }) => {
                             tracing::error!("Repair failed: {}", message);
+                            backoff.remove(&job.job_id);
                             Some(format!(
                                 "Job {} was stuck for {}s, recovery failed permanently: {}",
                                 job.job_id,
@@ -319,6 +344,7 @@ impl Agent {
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!("Manual intervention needed: {}", message);
+                            backoff.remove(&job.job_id);
                             Some(format!(
                                 "Job {} needs manual intervention: {}",
                                 job.job_id, message
@@ -326,10 +352,28 @@ impl Agent {
                         }
                         Ok(RepairResult::Retry { message }) => {
                             tracing::warn!("Repair needs retry: {}", message);
+                            let next_attempt = attempt + 1;
+                            let multiplier = 2u64.saturating_pow(next_attempt);
+                            let delay = repair_interval
+                                .saturating_mul(multiplier as u32)
+                                .min(MAX_BACKOFF);
+                            backoff.insert(
+                                job.job_id,
+                                (next_attempt, std::time::Instant::now() + delay),
+                            );
                             None // Don't spam the user on retries
                         }
                         Err(e) => {
                             tracing::error!("Repair error: {}", e);
+                            let next_attempt = attempt + 1;
+                            let multiplier = 2u64.saturating_pow(next_attempt);
+                            let delay = repair_interval
+                                .saturating_mul(multiplier as u32)
+                                .min(MAX_BACKOFF);
+                            backoff.insert(
+                                job.job_id,
+                                (next_attempt, std::time::Instant::now() + delay),
+                            );
                             None
                         }
                     };
@@ -339,6 +383,9 @@ impl Agent {
                         let _ = repair_channels.broadcast_all("default", response).await;
                     }
                 }
+
+                // Clean up backoff entries for jobs no longer stuck.
+                backoff.retain(|id, _| stuck_ids.contains(id));
 
                 // Check broken tools
                 let broken_tools = repair.detect_broken_tools().await;

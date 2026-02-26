@@ -15,10 +15,24 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+/// Maximum size for a single chat message content field (32 KiB).
+const MAX_CHAT_MESSAGE_BYTES: usize = 32 * 1024;
+
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if req.content.len() > MAX_CHAT_MESSAGE_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Message too large ({} bytes, max {})",
+                req.content.len(),
+                MAX_CHAT_MESSAGE_BYTES
+            ),
+        ));
+    }
+
     if !state.chat_rate_limiter.check() {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,

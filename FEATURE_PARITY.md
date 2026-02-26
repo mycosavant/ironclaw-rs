@@ -22,7 +22,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Single-user system         | ✅       | ✅       |                                             |
 | Multi-agent routing        | ✅       | ❌       | Workspace isolation per-agent               |
 | Session-based messaging    | ✅       | ✅       | Per-sender sessions                         |
-| Loopback-first networking  | ✅       | ✅       | HTTP binds to 0.0.0.0 but can be configured |
+| Loopback-first networking  | ✅       | ✅       | HTTP and gateway both default to 127.0.0.1   |
 
 ### Owner: _Unassigned_
 
@@ -51,8 +51,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                         |
 | Trusted-proxy auth mode             | ✅       | ❌       | Header-based auth for reverse proxies                                                  |
 | APNs push pipeline                  | ✅       | ❌       | Wake disconnected iOS nodes via push                                                   |
-| Oversized payload guard             | ✅       | 🚧       | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap           |
-| Pre-prompt context diagnostics      | ✅       | ❌       | Context size logging before prompt                                                     |
+| Oversized payload guard             | ✅       | ✅       | HTTP webhook 64KB + gateway chat 32KB content limit (413 on exceed)                    |
+| Pre-prompt context diagnostics      | ✅       | ✅       | `tracing::debug!` before every LLM call with message/tool/char counts                  |
 
 ### Owner: _Unassigned_
 
@@ -124,7 +124,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Typing indicators              | ✅       | 🚧       | TUI + Telegram typing/actionable status prompts; richer parity pending |
 | Per-channel ackReaction config | ✅       | ❌       | Customizable acknowledgement reactions                                 |
 | Group session priming          | ✅       | ❌       | Member roster injected for context                                     |
-| Sender_id in trusted metadata  | ✅       | ❌       | Exposed in system metadata                                             |
+| Sender_id in trusted metadata  | ✅       | ✅       | `sender_id`/`sender_name` injected into ReasoningContext metadata      |
 
 ### Owner: _Unassigned_
 
@@ -176,7 +176,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Multi-provider failover            | ✅       | ✅       | `FailoverProvider` tries providers sequentially on retryable errors                                                                                                               |
 | Per-sender sessions                | ✅       | ✅       |                                                                                                                                                                                   |
 | Global sessions                    | ✅       | ❌       | Optional shared context                                                                                                                                                           |
-| Session pruning                    | ✅       | ❌       | Auto cleanup old sessions                                                                                                                                                         |
+| Session pruning                    | ✅       | ✅       | `prune_stale_sessions()` with configurable idle timeout; 10-min background tick                                                                                                    |
 | Context compaction                 | ✅       | ✅       | Auto summarization                                                                                                                                                                |
 | Post-compaction read audit         | ✅       | ❌       | Layer 3: workspace rules appended to summaries                                                                                                                                    |
 | Post-compaction context injection  | ✅       | ❌       | Workspace context as system event                                                                                                                                                 |
@@ -197,11 +197,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `/subagents spawn` command         | ✅       | ❌       | Spawn from chat                                                                                                                                                                   |
 | Auth profiles                      | ✅       | ❌       | Multiple auth strategies                                                                                                                                                          |
 | Generic API key rotation           | ✅       | ❌       | Rotate keys across providers                                                                                                                                                      |
-| Stuck loop detection               | ✅       | ❌       | Exponential backoff on stuck agent loops                                                                                                                                          |
+| Stuck loop detection               | ✅       | ✅       | Per-job exponential backoff (2^n × interval, 10min cap); stuck_threshold filtering                                                                                                |
 | llms.txt discovery                 | ✅       | ❌       | Auto-discover site metadata                                                                                                                                                       |
 | Multiple images per tool call      | ✅       | ❌       | Single tool call, multiple images                                                                                                                                                 |
 | URL allowlist (web_search/fetch)   | ✅       | ❌       | Restrict web tool targets                                                                                                                                                         |
-| suppressToolErrors config          | ✅       | ❌       | Hide tool errors from user                                                                                                                                                        |
+| suppressToolErrors config          | ✅       | ✅       | `SUPPRESS_TOOL_ERRORS` env; generic message for SSE/logs, full error kept for LLM                                                                                                 |
 | Intent-first tool display          | ✅       | ❌       | Details and exec summaries                                                                                                                                                        |
 | Transcript file size in status     | ✅       | ❌       | Show size in session status                                                                                                                                                       |
 
@@ -451,7 +451,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | SSRF protection                    | ✅       | ✅       | WASM allowlist                                                                                        |
 | SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                          |
 | Cron webhook SSRF guard            | ✅       | ✅       | dispatch_client_for_target in hooks/bundled.rs (DNS resolve + IP blocklist)                           |
-| Loopback-first                     | ✅       | 🚧       | HTTP binds 0.0.0.0                                                                                    |
+| Loopback-first                     | ✅       | ✅       | HTTP and gateway both default to 127.0.0.1                                                             |
 | Docker sandbox                     | ✅       | ✅       | Orchestrator/worker containers                                                                        |
 | Podman support                     | ✅       | ❌       | Alternative to Docker                                                                                 |
 | WASM sandbox                       | ❌       | ✅       | IronClaw innovation                                                                                   |
@@ -558,7 +558,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Streaming (block/tool/Z.AI tool_stream)
 - ❌ Memory: temporal decay, MMR re-ranking, query expansion
 - ❌ Control UI i18n
-- ❌ Stuck loop detection
+- ✅ Stuck loop detection (exponential backoff)
 
 ---
 
