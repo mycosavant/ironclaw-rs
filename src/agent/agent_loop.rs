@@ -486,6 +486,46 @@ impl Agent {
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
+        // Hook: BeforeAgentStart — allow hooks to observe/modify startup parameters
+        {
+            let model = self.deps.llm.model_name().to_string();
+            let provider = std::env::var("LLM_BACKEND").unwrap_or_else(|_| "nearai".to_string());
+            let event = crate::hooks::HookEvent::AgentStart {
+                user_id: self.config.name.clone(),
+                model: model.clone(),
+                provider: provider.clone(),
+                model_override: None,
+                provider_override: None,
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::warn!("BeforeAgentStart hook rejected startup: {}", reason);
+                    // Agent startup is not halted — hooks cannot prevent the agent from running.
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeAgentStart hook error (non-fatal): {}", err);
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(override_json),
+                }) => {
+                    // Parse model/provider override from the JSON modification string.
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&override_json) {
+                        let m = v.get("model").and_then(|x| x.as_str()).unwrap_or(&model);
+                        let p = v
+                            .get("provider")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or(&provider);
+                        tracing::info!(
+                            "BeforeAgentStart hook requested model override: {} / {}",
+                            m,
+                            p
+                        );
+                    }
+                }
+                Ok(_) => {}
+            }
+        }
+
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
 

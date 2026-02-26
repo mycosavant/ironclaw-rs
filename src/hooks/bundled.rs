@@ -515,6 +515,16 @@ enum OutboundWebhookEventSummary {
     ResponseTransform {
         response_length: usize,
     },
+    AgentStart {
+        user_id: String,
+        model: String,
+        provider: String,
+    },
+    MessageWrite {
+        user_id: String,
+        role: String,
+        content_length: usize,
+    },
 }
 
 #[async_trait]
@@ -629,6 +639,26 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
         },
         HookEvent::SessionStart { .. } => OutboundWebhookEventSummary::SessionStart,
         HookEvent::SessionEnd { .. } => OutboundWebhookEventSummary::SessionEnd,
+        HookEvent::AgentStart {
+            user_id,
+            model,
+            provider,
+            ..
+        } => OutboundWebhookEventSummary::AgentStart {
+            user_id: user_id.clone(),
+            model: model.clone(),
+            provider: provider.clone(),
+        },
+        HookEvent::MessageWrite {
+            user_id,
+            role,
+            content,
+            ..
+        } => OutboundWebhookEventSummary::MessageWrite {
+            user_id: user_id.clone(),
+            role: role.clone(),
+            content_length: content.len(),
+        },
         HookEvent::ResponseTransform { response, .. } => {
             OutboundWebhookEventSummary::ResponseTransform {
                 response_length: response.len(),
@@ -879,7 +909,9 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::Outbound { user_id, .. }
         | HookEvent::SessionStart { user_id, .. }
         | HookEvent::SessionEnd { user_id, .. }
-        | HookEvent::ResponseTransform { user_id, .. } => user_id,
+        | HookEvent::ResponseTransform { user_id, .. }
+        | HookEvent::AgentStart { user_id, .. }
+        | HookEvent::MessageWrite { user_id, .. } => user_id,
     }
 }
 
@@ -893,6 +925,8 @@ fn extract_primary_content(event: &HookEvent) -> String {
             session_id.clone()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
+        HookEvent::AgentStart { model, .. } => model.clone(),
+        HookEvent::MessageWrite { content, .. } => content.clone(),
     }
 }
 

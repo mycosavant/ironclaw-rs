@@ -179,6 +179,8 @@ fn extract_content(event: &HookEvent) -> String {
         HookEvent::SessionStart { session_id, .. } | HookEvent::SessionEnd { session_id, .. } => {
             session_id.clone()
         }
+        HookEvent::AgentStart { model, .. } => model.clone(),
+        HookEvent::MessageWrite { content, .. } => content.clone(),
     }
 }
 

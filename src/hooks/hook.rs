@@ -9,12 +9,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HookPoint {
+    /// Before the agent process starts accepting requests.
+    BeforeAgentStart,
     /// Before processing an inbound user message.
     BeforeInbound,
     /// Before executing a tool call.
     BeforeToolCall,
     /// Before sending an outbound response.
     BeforeOutbound,
+    /// Before a message is persisted to the conversation store.
+    BeforeMessageWrite,
     /// When a new session starts.
     OnSessionStart,
     /// When a session ends (pruned or expired).
@@ -27,9 +31,11 @@ impl HookPoint {
     /// Human-readable hook point identifier.
     pub fn as_str(&self) -> &'static str {
         match self {
+            HookPoint::BeforeAgentStart => "beforeAgentStart",
             HookPoint::BeforeInbound => "beforeInbound",
             HookPoint::BeforeToolCall => "beforeToolCall",
             HookPoint::BeforeOutbound => "beforeOutbound",
+            HookPoint::BeforeMessageWrite => "beforeMessageWrite",
             HookPoint::OnSessionStart => "onSessionStart",
             HookPoint::OnSessionEnd => "onSessionEnd",
             HookPoint::TransformResponse => "transformResponse",
@@ -40,6 +46,17 @@ impl HookPoint {
 /// Contextual data carried with each hook invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookEvent {
+    /// The agent process is about to start accepting requests.
+    ///
+    /// Hooks can return a `modify` response with JSON `{"model":"...",
+    /// "provider":"..."}` to override the startup model/provider selection.
+    AgentStart {
+        user_id: String,
+        model: String,
+        provider: String,
+        model_override: Option<String>,
+        provider_override: Option<String>,
+    },
     /// An inbound user message about to be processed.
     Inbound {
         user_id: String,
@@ -62,6 +79,17 @@ pub enum HookEvent {
         content: String,
         thread_id: Option<String>,
     },
+    /// A message is about to be written to the conversation store.
+    ///
+    /// Hooks can modify `content` (e.g. redact secrets, add metadata) or
+    /// reject the write.
+    MessageWrite {
+        user_id: String,
+        thread_id: String,
+        /// Role string: `"user"`, `"assistant"`, `"tool_result"`, etc.
+        role: String,
+        content: String,
+    },
     /// A new session was created.
     SessionStart { user_id: String, session_id: String },
     /// A session was ended (pruned).
@@ -78,9 +106,11 @@ impl HookEvent {
     /// Returns the [`HookPoint`] this event corresponds to.
     pub fn hook_point(&self) -> HookPoint {
         match self {
+            HookEvent::AgentStart { .. } => HookPoint::BeforeAgentStart,
             HookEvent::Inbound { .. } => HookPoint::BeforeInbound,
             HookEvent::ToolCall { .. } => HookPoint::BeforeToolCall,
             HookEvent::Outbound { .. } => HookPoint::BeforeOutbound,
+            HookEvent::MessageWrite { .. } => HookPoint::BeforeMessageWrite,
             HookEvent::SessionStart { .. } => HookPoint::OnSessionStart,
             HookEvent::SessionEnd { .. } => HookPoint::OnSessionEnd,
             HookEvent::ResponseTransform { .. } => HookPoint::TransformResponse,
@@ -90,7 +120,9 @@ impl HookEvent {
     /// Apply a modification string to the event's primary content field.
     pub fn apply_modification(&mut self, modified: &str) {
         match self {
-            HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => {
+            HookEvent::Inbound { content, .. }
+            | HookEvent::Outbound { content, .. }
+            | HookEvent::MessageWrite { content, .. } => {
                 *content = modified.to_string();
             }
             HookEvent::ToolCall { parameters, .. } => match serde_json::from_str(modified) {
@@ -104,6 +136,30 @@ impl HookEvent {
             },
             HookEvent::ResponseTransform { response, .. } => {
                 *response = modified.to_string();
+            }
+            HookEvent::AgentStart {
+                model_override,
+                provider_override,
+                ..
+            } => {
+                // Modification must be JSON: {"model":"...", "provider":"..."}.
+                // Unknown fields are silently ignored; partial updates are fine.
+                match serde_json::from_str::<serde_json::Value>(modified) {
+                    Ok(v) => {
+                        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
+                            *model_override = Some(m.to_string());
+                        }
+                        if let Some(p) = v.get("provider").and_then(|p| p.as_str()) {
+                            *provider_override = Some(p.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Hook returned non-JSON modification for AgentStart, ignoring: {}",
+                            e
+                        );
+                    }
+                }
             }
             HookEvent::SessionStart { .. } | HookEvent::SessionEnd { .. } => {
                 // Session events don't have modifiable content

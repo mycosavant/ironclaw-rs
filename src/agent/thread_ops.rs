@@ -460,6 +460,34 @@ impl Agent {
             None => return,
         };
 
+        // Hook: BeforeMessageWrite — allow hooks to observe or modify the user message
+        // before it is persisted. A rejection suppresses the DB write.
+        let effective_content = {
+            let event = crate::hooks::HookEvent::MessageWrite {
+                user_id: user_id.to_string(),
+                thread_id: thread_id.to_string(),
+                role: "user".to_string(),
+                content: user_input.to_string(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::debug!(
+                        "BeforeMessageWrite hook suppressed user message persist: {}",
+                        reason
+                    );
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeMessageWrite hook error (non-fatal): {}", err);
+                    user_input.to_string()
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_content),
+                }) => new_content,
+                Ok(_) => user_input.to_string(),
+            }
+        };
+
         if let Err(e) = store
             .ensure_conversation(thread_id, "gateway", user_id, None)
             .await
@@ -469,7 +497,7 @@ impl Agent {
         }
 
         if let Err(e) = store
-            .add_conversation_message(thread_id, "user", user_input)
+            .add_conversation_message(thread_id, "user", &effective_content)
             .await
         {
             tracing::warn!("Failed to persist user message: {}", e);
@@ -492,6 +520,34 @@ impl Agent {
             None => return,
         };
 
+        // Hook: BeforeMessageWrite — allow hooks to observe or modify the assistant
+        // response before it is persisted. A rejection suppresses the DB write.
+        let effective_content = {
+            let event = crate::hooks::HookEvent::MessageWrite {
+                user_id: user_id.to_string(),
+                thread_id: thread_id.to_string(),
+                role: "assistant".to_string(),
+                content: response.to_string(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::debug!(
+                        "BeforeMessageWrite hook suppressed assistant message persist: {}",
+                        reason
+                    );
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeMessageWrite hook error (non-fatal): {}", err);
+                    response.to_string()
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_content),
+                }) => new_content,
+                Ok(_) => response.to_string(),
+            }
+        };
+
         if let Err(e) = store
             .ensure_conversation(thread_id, "gateway", user_id, None)
             .await
@@ -501,7 +557,7 @@ impl Agent {
         }
 
         if let Err(e) = store
-            .add_conversation_message(thread_id, "assistant", response)
+            .add_conversation_message(thread_id, "assistant", &effective_content)
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
