@@ -115,8 +115,7 @@ impl NetworkProxyBuilder {
         store: Arc<dyn SecretsStore>,
         user_id: impl Into<String>,
     ) -> Self {
-        self.credential_resolver =
-            Arc::new(SecretsStoreCredentialResolver::new(store, user_id));
+        self.credential_resolver = Arc::new(SecretsStoreCredentialResolver::new(store, user_id));
         self
     }
 

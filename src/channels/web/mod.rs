@@ -98,6 +98,7 @@ impl GatewayChannel {
             routine_last_tick: None,
             repair_last_tick: None,
             session_store: session_store::new_session_store(),
+            channel_health: None,
         });
 
         Self {
@@ -135,6 +136,7 @@ impl GatewayChannel {
             heartbeat_last_tick: self.state.heartbeat_last_tick.clone(),
             routine_last_tick: self.state.routine_last_tick.clone(),
             repair_last_tick: self.state.repair_last_tick.clone(),
+            channel_health: self.state.channel_health.clone(),
             session_store: self.state.session_store.clone(),
         };
         mutate(&mut new_state);
@@ -250,6 +252,12 @@ impl GatewayChannel {
     /// Inject the self-repair liveness tick atomic.
     pub fn with_repair_tick(mut self, tick: Arc<std::sync::atomic::AtomicI64>) -> Self {
         self.rebuild_state(|s| s.repair_last_tick = Some(tick));
+        self
+    }
+
+    /// Inject the shared channel health state for the channels API.
+    pub fn with_channel_health(mut self, ch: crate::channels::SharedChannelHealth) -> Self {
+        self.rebuild_state(|s| s.channel_health = Some(ch));
         self
     }
 

@@ -97,15 +97,12 @@ impl SignedManifest {
             return Ok(None); // Incomplete — skip signature verification
         };
 
-        let sha256_bytes = hex::decode(sha256_hex).map_err(|e| {
-            VerificationError::InvalidHex(format!("sha256: {}", e))
-        })?;
-        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|e| {
-            VerificationError::InvalidHex(format!("publisher_pubkey: {}", e))
-        })?;
-        let sig_bytes = hex::decode(sig_hex).map_err(|e| {
-            VerificationError::InvalidHex(format!("signature: {}", e))
-        })?;
+        let sha256_bytes = hex::decode(sha256_hex)
+            .map_err(|e| VerificationError::InvalidHex(format!("sha256: {}", e)))?;
+        let pubkey_bytes = hex::decode(pubkey_hex)
+            .map_err(|e| VerificationError::InvalidHex(format!("publisher_pubkey: {}", e)))?;
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| VerificationError::InvalidHex(format!("signature: {}", e)))?;
 
         let binary_sha256: [u8; 32] = sha256_bytes.try_into().map_err(|_| {
             VerificationError::InvalidHex("sha256 must be 32 bytes (64 hex chars)".to_string())
@@ -140,14 +137,15 @@ impl SignedManifest {
     pub fn verify_signature(&self, name: &str, version: &str) -> Result<(), VerificationError> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-        let vk = VerifyingKey::from_bytes(&self.publisher_pubkey).map_err(|e| {
-            VerificationError::InvalidPublicKey(e.to_string())
-        })?;
+        let vk = VerifyingKey::from_bytes(&self.publisher_pubkey)
+            .map_err(|e| VerificationError::InvalidPublicKey(e.to_string()))?;
         let sig = Signature::from_bytes(&self.signature);
         let msg = Self::signing_message(name, version, &self.binary_sha256);
 
         vk.verify(&msg, &sig)
-            .map_err(|_| VerificationError::SignatureInvalid { name: name.to_string() })
+            .map_err(|_| VerificationError::SignatureInvalid {
+                name: name.to_string(),
+            })
     }
 }
 
@@ -280,9 +278,8 @@ impl DownloadVerification {
         let sha256 = match sha256_hex {
             None => None,
             Some(hex_str) => {
-                let bytes = hex::decode(hex_str).map_err(|e| {
-                    VerificationError::InvalidHex(format!("sha256: {}", e))
-                })?;
+                let bytes = hex::decode(hex_str)
+                    .map_err(|e| VerificationError::InvalidHex(format!("sha256: {}", e)))?;
                 let arr: [u8; 32] = bytes.try_into().map_err(|_| {
                     VerificationError::InvalidHex(
                         "sha256 must be 32 bytes (64 hex chars)".to_string(),
@@ -293,7 +290,8 @@ impl DownloadVerification {
         };
 
         // Parse SignedManifest (requires all three fields)
-        let signed_manifest = SignedManifest::from_hex(sha256_hex, publisher_pubkey_hex, signature_hex)?;
+        let signed_manifest =
+            SignedManifest::from_hex(sha256_hex, publisher_pubkey_hex, signature_hex)?;
 
         if sha256.is_none() && signed_manifest.is_none() {
             return Ok(None); // Nothing to verify
@@ -349,7 +347,9 @@ impl DownloadVerification {
                 "Publisher key not in trust store — signature verification skipped"
             );
             // Policy: unknown keys are treated as untrusted → reject
-            return Err(VerificationError::SignatureInvalid { name: name.to_string() });
+            return Err(VerificationError::SignatureInvalid {
+                name: name.to_string(),
+            });
         }
 
         manifest.verify_signature(name, &self.version)
@@ -518,7 +518,11 @@ mod tests {
             sha256: None,
             signed_manifest: None,
         };
-        assert!(verif.verify_signature("any-tool", &TrustedKeyStore::empty()).is_ok());
+        assert!(
+            verif
+                .verify_signature("any-tool", &TrustedKeyStore::empty())
+                .is_ok()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -593,14 +597,20 @@ mod tests {
         let result = verif.verify_signature("my-tool", &TrustedKeyStore::empty());
         assert!(
             matches!(result, Err(VerificationError::SignatureInvalid { .. })),
-            "empty trust store must reject all signatures; got {:?}", result
+            "empty trust store must reject all signatures; got {:?}",
+            result
         );
     }
 
     #[test]
     fn wrong_length_sha256_hex_returns_error() {
         // 30 hex chars = 15 bytes, not 32
-        let err = DownloadVerification::from_artifact("1.0.0", Some("aabbccddeeff001122334455"), None, None);
+        let err = DownloadVerification::from_artifact(
+            "1.0.0",
+            Some("aabbccddeeff001122334455"),
+            None,
+            None,
+        );
         assert!(matches!(err, Err(VerificationError::InvalidHex(_))));
     }
 
@@ -618,7 +628,8 @@ mod tests {
         let result = verif.verify_hash(modified);
         assert!(
             matches!(result, Err(VerificationError::HashMismatch { .. })),
-            "tampered binary must not pass hash check; got {:?}", result
+            "tampered binary must not pass hash check; got {:?}",
+            result
         );
     }
 }

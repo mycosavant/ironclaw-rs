@@ -226,6 +226,18 @@ function connectSSE() {
       }
     });
   }
+
+  // Channel health push events
+  eventSource.addEventListener('channel_health', (e) => {
+    try { var data = JSON.parse(e.data); } catch (_) { return; }
+    if (currentTab === 'channels' && data.channels) {
+      renderChannelHealth(data.channels);
+      // Derive summary from pushed snapshot (SSE payload has no summary field)
+      const s = { total: 0, healthy: 0, degraded: 0, failed: 0, unknown: 0 };
+      data.channels.forEach((ch) => { s.total++; if (ch.status in s) s[ch.status]++; });
+      renderChannelsSummary(s);
+    }
+  });
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
@@ -844,6 +856,7 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
+  if (tab === 'channels') loadChannels();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') loadExtensions();
 }
@@ -2269,6 +2282,88 @@ function sendJobPrompt(jobId, done) {
       appendActivityEvent(terminal, 'status', { message: 'Failed to send: ' + err.message });
     }
   });
+}
+
+// --- Channels ---
+
+function loadChannels() {
+  apiFetch('/api/channels').then(function(data) {
+    renderChannelsSummary(data.summary);
+    renderChannelHealth(data.channels);
+  }).catch(function() {
+    document.getElementById('channels-summary').innerHTML = '';
+    document.getElementById('channels-grid').innerHTML =
+      '<div class="empty-state">Failed to load channel health</div>';
+  });
+}
+
+function renderChannelsSummary(s) {
+  if (!s) return;
+  document.getElementById('channels-summary').innerHTML = ''
+    + summaryCard('Total', s.total || 0, '')
+    + summaryCard('Healthy', s.healthy || 0, 'completed')
+    + summaryCard('Degraded', s.degraded || 0, 'degraded')
+    + summaryCard('Failed', s.failed || 0, 'failed')
+    + summaryCard('Unknown', s.unknown || 0, 'unknown');
+}
+
+function renderChannelHealth(channels) {
+  var grid = document.getElementById('channels-grid');
+  if (!channels || channels.length === 0) {
+    grid.innerHTML = '<div class="empty-state">No channels registered yet. Wait for the health monitor to run its first check.</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  for (var i = 0; i < channels.length; i++) {
+    var ch = channels[i];
+    // Sanitize status to a known CSS class token (defense-in-depth)
+    var statusClass = { healthy: 'healthy', degraded: 'degraded', failed: 'failed', unknown: 'unknown' }[ch.status] || 'unknown';
+
+    var card = document.createElement('div');
+    card.className = 'channel-card';
+
+    var header = document.createElement('div');
+    header.className = 'ch-header';
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'ch-name';
+    nameSpan.textContent = ch.name;
+    var badgeSpan = document.createElement('span');
+    badgeSpan.className = 'badge ' + statusClass;
+    badgeSpan.textContent = ch.status;
+    header.appendChild(nameSpan);
+    header.appendChild(badgeSpan);
+    card.appendChild(header);
+
+    var stats = document.createElement('div');
+    stats.className = 'ch-stats';
+    stats.appendChild(statItem('Failures', String(ch.consecutive_failures || 0)));
+    stats.appendChild(statItem('Last checked', formatDate(ch.last_checked)));
+    stats.appendChild(statItem('Last transition', formatDate(ch.last_transition)));
+    card.appendChild(stats);
+
+    if (ch.last_error) {
+      var err = document.createElement('div');
+      err.className = 'ch-error';
+      err.textContent = ch.last_error;
+      card.appendChild(err);
+    }
+
+    grid.appendChild(card);
+  }
+}
+
+function statItem(label, value) {
+  var el = document.createElement('div');
+  el.className = 'ch-stat';
+  var lbl = document.createElement('span');
+  lbl.className = 'ch-stat-label';
+  lbl.textContent = label;
+  var val = document.createElement('span');
+  val.className = 'ch-stat-value';
+  val.textContent = value;
+  el.appendChild(lbl);
+  el.appendChild(val);
+  return el;
 }
 
 // --- Routines ---

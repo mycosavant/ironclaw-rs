@@ -180,23 +180,22 @@ impl Tool for MemorySearchTool {
         // Filter results by document path when an installed skill is active.
         // Installed skills must not learn about the existence or content of paths
         // outside their allowed prefixes.
-        let (results, filtered_count) =
-            if let Some(trust) = ctx.active_skill_trust
-                && let Some(prefixes) = readable_prefixes_for_trust(trust)
-            {
-                let before = results.len();
-                let filtered: Vec<_> = results
-                    .into_iter()
-                    .filter(|r| {
-                        let p = r.document_path.trim_start_matches('/');
-                        prefixes.iter().any(|prefix| p.starts_with(prefix))
-                    })
-                    .collect();
-                let removed = before - filtered.len();
-                (filtered, removed)
-            } else {
-                (results, 0)
-            };
+        let (results, filtered_count) = if let Some(trust) = ctx.active_skill_trust
+            && let Some(prefixes) = readable_prefixes_for_trust(trust)
+        {
+            let before = results.len();
+            let filtered: Vec<_> = results
+                .into_iter()
+                .filter(|r| {
+                    let p = r.document_path.trim_start_matches('/');
+                    prefixes.iter().any(|prefix| p.starts_with(prefix))
+                })
+                .collect();
+            let removed = before - filtered.len();
+            (filtered, removed)
+        } else {
+            (results, 0)
+        };
 
         let output = serde_json::json!({
             "query": query,
@@ -733,7 +732,8 @@ mod policy_tests {
         let err = check_read_path("skills/../secrets/key", SkillTrust::Installed);
         assert!(
             matches!(err, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("..")),
-            "expected NotAuthorized with '..' mention, got {:?}", err
+            "expected NotAuthorized with '..' mention, got {:?}",
+            err
         );
     }
 
@@ -743,7 +743,8 @@ mod policy_tests {
         let err = check_read_path("context/../../../etc/passwd", SkillTrust::Trusted);
         assert!(
             matches!(err, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("..")),
-            "Trusted skills must also be blocked from '..' traversal; got {:?}", err
+            "Trusted skills must also be blocked from '..' traversal; got {:?}",
+            err
         );
     }
 
@@ -760,7 +761,8 @@ mod policy_tests {
             let err = check_read_path(path, SkillTrust::Installed);
             assert!(
                 matches!(err, Err(ToolError::NotAuthorized(_))),
-                "path '{}' should be blocked but was allowed", path
+                "path '{}' should be blocked but was allowed",
+                path
             );
         }
     }

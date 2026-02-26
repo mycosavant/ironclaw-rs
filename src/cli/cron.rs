@@ -9,9 +9,7 @@ use chrono::Utc;
 use clap::Subcommand;
 use uuid::Uuid;
 
-use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
-};
+use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
 use crate::db::Database;
 
 /// Manage scheduled routines (cron jobs, event triggers, webhooks).
@@ -135,18 +133,35 @@ pub async fn run_cron_command_with_db(
             description,
             enable,
             disable,
-        } => edit(&db, &user_id, &name_or_id, schedule, prompt, description, enable, disable).await,
-        CronCommand::Remove { name_or_id, yes } => remove(&db, &user_id, &name_or_id, yes).await,
-        CronCommand::Webhook { name_or_id, gateway } => {
-            webhook_url(&db, &user_id, &name_or_id, &gateway).await
+        } => {
+            edit(
+                &db,
+                &user_id,
+                &name_or_id,
+                schedule,
+                prompt,
+                description,
+                enable,
+                disable,
+            )
+            .await
         }
+        CronCommand::Remove { name_or_id, yes } => remove(&db, &user_id, &name_or_id, yes).await,
+        CronCommand::Webhook {
+            name_or_id,
+            gateway,
+        } => webhook_url(&db, &user_id, &name_or_id, &gateway).await,
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Resolve a name-or-UUID string to a `Routine`.
-async fn resolve(db: &Arc<dyn Database>, user_id: &str, name_or_id: &str) -> anyhow::Result<Routine> {
+async fn resolve(
+    db: &Arc<dyn Database>,
+    user_id: &str,
+    name_or_id: &str,
+) -> anyhow::Result<Routine> {
     if let Ok(id) = Uuid::parse_str(name_or_id) {
         db.get_routine(id)
             .await?
@@ -176,8 +191,16 @@ fn trigger_label(t: &Trigger) -> String {
 fn action_label(a: &RoutineAction) -> String {
     match a {
         RoutineAction::Lightweight { prompt, .. } => {
-            let preview = if prompt.len() > 60 { &prompt[..60] } else { prompt };
-            format!("lightweight: \"{}{}\"", preview, if prompt.len() > 60 { "…" } else { "" })
+            let preview = if prompt.len() > 60 {
+                &prompt[..60]
+            } else {
+                prompt
+            };
+            format!(
+                "lightweight: \"{}{}\"",
+                preview,
+                if prompt.len() > 60 { "…" } else { "" }
+            )
         }
         RoutineAction::FullJob { title, .. } => format!("full_job: \"{}\"", title),
     }
@@ -240,7 +263,14 @@ async fn show(
 
     println!("Routine: {}", r.name);
     println!("  ID:          {}", r.id);
-    println!("  Description: {}", if r.description.is_empty() { "(none)" } else { &r.description });
+    println!(
+        "  Description: {}",
+        if r.description.is_empty() {
+            "(none)"
+        } else {
+            &r.description
+        }
+    );
     println!("  Enabled:     {}", r.enabled);
     println!("  Trigger:     {}", trigger_label(&r.trigger));
     println!("  Action:      {}", action_label(&r.action));
@@ -298,7 +328,10 @@ async fn add(
 ) -> anyhow::Result<()> {
     // Check for name collision.
     if db.get_routine_by_name(user_id, &name).await?.is_some() {
-        anyhow::bail!("A routine named '{}' already exists. Use `cron edit` to modify it.", name);
+        anyhow::bail!(
+            "A routine named '{}' already exists. Use `cron edit` to modify it.",
+            name
+        );
     }
 
     let now = Utc::now();
@@ -308,7 +341,9 @@ async fn add(
         description,
         user_id: user_id.to_string(),
         enabled: enable,
-        trigger: Trigger::Cron { schedule: schedule.clone() },
+        trigger: Trigger::Cron {
+            schedule: schedule.clone(),
+        },
         action: RoutineAction::Lightweight {
             prompt,
             context_paths: vec![],
@@ -331,7 +366,10 @@ async fn add(
     println!("  Schedule: {}", schedule);
     println!("  Enabled:  {}", enable);
     if !enable {
-        println!("  Tip: pass --enable to start it now, or use `cron edit {} --enable`", name);
+        println!(
+            "  Tip: pass --enable to start it now, or use `cron edit {} --enable`",
+            name
+        );
     }
 
     Ok(())
@@ -349,7 +387,9 @@ async fn edit(
     disable: bool,
 ) -> anyhow::Result<()> {
     if schedule.is_none() && prompt.is_none() && description.is_none() && !enable && !disable {
-        anyhow::bail!("Nothing to change. Pass at least one of --schedule, --prompt, --description, --enable, --disable.");
+        anyhow::bail!(
+            "Nothing to change. Pass at least one of --schedule, --prompt, --description, --enable, --disable."
+        );
     }
 
     let mut routine = resolve(db, user_id, name_or_id).await?;
@@ -380,7 +420,11 @@ async fn edit(
                     max_tokens: *max_tokens,
                 };
             }
-            RoutineAction::FullJob { title, max_iterations, .. } => {
+            RoutineAction::FullJob {
+                title,
+                max_iterations,
+                ..
+            } => {
                 routine.action = RoutineAction::FullJob {
                     title: title.clone(),
                     description: p,
@@ -418,10 +462,7 @@ async fn remove(
 
     if !yes {
         // Prompt the user.
-        print!(
-            "Delete routine '{}' ({})? [y/N] ",
-            routine.name, routine.id
-        );
+        print!("Delete routine '{}' ({})? [y/N] ", routine.name, routine.id);
         use std::io::Write;
         std::io::stdout().flush()?;
 
@@ -456,7 +497,11 @@ async fn webhook_url(
                 .as_deref()
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| routine.id.to_string());
-            let url = format!("{}/hooks/routine/{}", gateway.trim_end_matches('/'), path_segment);
+            let url = format!(
+                "{}/hooks/routine/{}",
+                gateway.trim_end_matches('/'),
+                path_segment
+            );
             println!("Webhook URL: {}", url);
             if secret.is_some() {
                 println!("Secret:      (configured — send as X-Webhook-Secret header)");
@@ -476,9 +521,5 @@ async fn webhook_url(
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }

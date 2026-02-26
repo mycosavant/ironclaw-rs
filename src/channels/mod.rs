@@ -37,7 +37,10 @@ pub mod web;
 mod webhook_server;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-pub use health_monitor::{ChannelHealthMonitor, HealthMonitorConfig};
+pub use health_monitor::{
+    ChannelHealthMonitor, ChannelHealthSnapshot, ChannelStatus, HealthMonitorConfig,
+    SharedChannelHealth,
+};
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;

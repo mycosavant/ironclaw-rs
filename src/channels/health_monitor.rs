@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::channels::{ChannelManager, IncomingMessage};
 
@@ -55,7 +57,8 @@ impl Default for HealthMonitorConfig {
 // ---------------------------------------------------------------------------
 
 /// Health status of a single channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChannelStatus {
     /// Not yet checked — initial state before the first poll completes.
     /// This prevents a spurious "recovered" log if the first check succeeds.
@@ -66,7 +69,7 @@ pub enum ChannelStatus {
 }
 
 impl ChannelStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Healthy => "healthy",
@@ -76,6 +79,22 @@ impl ChannelStatus {
     }
 }
 
+/// A point-in-time snapshot of a single channel's health, suitable for
+/// serialization to API consumers.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelHealthSnapshot {
+    pub name: String,
+    pub status: ChannelStatus,
+    pub consecutive_failures: u32,
+    pub last_checked: DateTime<Utc>,
+    pub last_transition: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// Shared channel health state readable by API handlers.
+pub type SharedChannelHealth = Arc<RwLock<HashMap<String, ChannelHealthSnapshot>>>;
+
 /// Running health record for a channel.
 #[derive(Debug, Clone)]
 struct ChannelHealth {
@@ -84,6 +103,8 @@ struct ChannelHealth {
     last_checked: DateTime<Utc>,
     /// When the status last transitioned.
     last_transition: DateTime<Utc>,
+    /// Most recent error message (cleared on success).
+    last_error: Option<String>,
 }
 
 impl ChannelHealth {
@@ -94,6 +115,19 @@ impl ChannelHealth {
             consecutive_failures: 0,
             last_checked: now,
             last_transition: now,
+            last_error: None,
+        }
+    }
+
+    /// Build a public snapshot from this internal record.
+    fn snapshot(&self, name: &str) -> ChannelHealthSnapshot {
+        ChannelHealthSnapshot {
+            name: name.to_string(),
+            status: self.status,
+            consecutive_failures: self.consecutive_failures,
+            last_checked: self.last_checked,
+            last_transition: self.last_transition,
+            last_error: self.last_error.clone(),
         }
     }
 }
@@ -106,12 +140,27 @@ impl ChannelHealth {
 pub struct ChannelHealthMonitor {
     manager: Arc<ChannelManager>,
     config: HealthMonitorConfig,
+    shared_health: SharedChannelHealth,
+    on_transition: Option<Arc<dyn Fn(Vec<ChannelHealthSnapshot>) + Send + Sync>>,
 }
 
 impl ChannelHealthMonitor {
     /// Create a new monitor for the given `ChannelManager`.
-    pub fn new(manager: Arc<ChannelManager>, config: HealthMonitorConfig) -> Self {
-        Self { manager, config }
+    ///
+    /// `shared_health` is written after every tick so API handlers can read it.
+    /// `on_transition` is called whenever any channel changes state (for SSE push).
+    pub fn new(
+        manager: Arc<ChannelManager>,
+        config: HealthMonitorConfig,
+        shared_health: SharedChannelHealth,
+        on_transition: Option<Arc<dyn Fn(Vec<ChannelHealthSnapshot>) + Send + Sync>>,
+    ) -> Self {
+        Self {
+            manager,
+            config,
+            shared_health,
+            on_transition,
+        }
     }
 
     /// Spawn the watchdog as a background tokio task.
@@ -135,6 +184,7 @@ impl ChannelHealthMonitor {
             interval.tick().await;
 
             let results = self.manager.health_check_all().await;
+            let mut any_transition = false;
 
             for (name, outcome) in &results {
                 let health = state.entry(name.clone()).or_insert_with(ChannelHealth::new);
@@ -142,38 +192,46 @@ impl ChannelHealthMonitor {
 
                 match outcome {
                     Ok(()) => {
-                        // "Recovered" only makes sense after a confirmed Degraded/Failed
-                        // state. Unknown (first check) and ongoing Healthy transitions
-                        // must not produce a spurious recovery notification.
-                        let recovered = matches!(
-                            health.status,
-                            ChannelStatus::Degraded | ChannelStatus::Failed
-                        );
                         let prev_failures = health.consecutive_failures;
                         health.consecutive_failures = 0;
+                        health.last_error = None;
 
-                        if recovered {
-                            let prev = health.status.as_str();
-                            health.status = ChannelStatus::Healthy;
-                            health.last_transition = Utc::now();
+                        match health.status {
+                            // First successful check — silently transition to Healthy
+                            // without emitting a notification (not a "recovery").
+                            ChannelStatus::Unknown => {
+                                health.status = ChannelStatus::Healthy;
+                                health.last_transition = Utc::now();
+                                any_transition = true;
+                            }
+                            // Actual recovery from a degraded/failed state.
+                            ChannelStatus::Degraded | ChannelStatus::Failed => {
+                                let prev = health.status.as_str();
+                                health.status = ChannelStatus::Healthy;
+                                health.last_transition = Utc::now();
+                                any_transition = true;
 
-                            tracing::info!(
-                                channel = %name,
-                                previous_status = prev,
-                                failures_cleared = prev_failures,
-                                "Channel recovered"
-                            );
+                                tracing::info!(
+                                    channel = %name,
+                                    previous_status = prev,
+                                    failures_cleared = prev_failures,
+                                    "Channel recovered"
+                                );
 
-                            let msg = format!(
-                                "[channel-monitor] Channel `{}` recovered (was {}, {} failure(s))",
-                                name, prev, prev_failures
-                            );
-                            notify(&inject, &self.config.notify_user_id, msg).await;
+                                let msg = format!(
+                                    "[channel-monitor] Channel `{}` recovered (was {}, {} failure(s))",
+                                    name, prev, prev_failures
+                                );
+                                notify(&inject, &self.config.notify_user_id, msg).await;
+                            }
+                            // Already Healthy — no state change.
+                            ChannelStatus::Healthy => {}
                         }
                     }
 
                     Err(err) => {
                         health.consecutive_failures += 1;
+                        health.last_error = Some(err.to_string());
                         let cf = health.consecutive_failures;
 
                         let new_status = if cf >= self.config.failed_threshold {
@@ -181,11 +239,14 @@ impl ChannelHealthMonitor {
                         } else if cf >= self.config.degraded_threshold {
                             ChannelStatus::Degraded
                         } else {
-                            ChannelStatus::Healthy
+                            // Below threshold — keep current status rather than
+                            // promoting Unknown/Degraded/Failed to Healthy.
+                            health.status
                         };
 
                         let transitioned = new_status != health.status;
                         if transitioned {
+                            any_transition = true;
                             let prev = health.status.as_str();
                             health.status = new_status;
                             health.last_transition = Utc::now();
@@ -240,6 +301,21 @@ impl ChannelHealthMonitor {
 
             // Prune entries for channels that no longer exist.
             state.retain(|name, _| results.contains_key(name));
+
+            // Publish snapshot to shared state for API consumers.
+            {
+                let snapshots: HashMap<String, ChannelHealthSnapshot> = state
+                    .iter()
+                    .map(|(name, h)| (name.clone(), h.snapshot(name)))
+                    .collect();
+                let snapshot_vec: Vec<ChannelHealthSnapshot> =
+                    snapshots.values().cloned().collect();
+                *self.shared_health.write().await = snapshots;
+
+                if any_transition && let Some(ref cb) = self.on_transition {
+                    cb(snapshot_vec);
+                }
+            }
         }
     }
 }
@@ -337,5 +413,72 @@ mod tests {
         // Give the spawned task a moment to process.
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn channel_status_serde_roundtrip() {
+        for status in &[
+            ChannelStatus::Unknown,
+            ChannelStatus::Healthy,
+            ChannelStatus::Degraded,
+            ChannelStatus::Failed,
+        ] {
+            let json = serde_json::to_string(status).unwrap();
+            let back: ChannelStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, back);
+        }
+    }
+
+    #[test]
+    fn channel_status_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ChannelStatus::Healthy).unwrap(),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChannelStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn snapshot_serialization() {
+        let snap = ChannelHealthSnapshot {
+            name: "telegram".to_string(),
+            status: ChannelStatus::Degraded,
+            consecutive_failures: 3,
+            last_checked: Utc::now(),
+            last_transition: Utc::now(),
+            last_error: None,
+        };
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["name"], "telegram");
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["consecutive_failures"], 3);
+        // last_error should be absent (skip_serializing_if)
+        assert!(json.get("last_error").is_none());
+    }
+
+    #[test]
+    fn snapshot_serialization_with_error() {
+        let snap = ChannelHealthSnapshot {
+            name: "slack".to_string(),
+            status: ChannelStatus::Failed,
+            consecutive_failures: 5,
+            last_checked: Utc::now(),
+            last_transition: Utc::now(),
+            last_error: Some("connection refused".to_string()),
+        };
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["last_error"], "connection refused");
+    }
+
+    #[test]
+    fn channel_health_snapshot_helper() {
+        let h = ChannelHealth::new();
+        let snap = h.snapshot("gateway");
+        assert_eq!(snap.name, "gateway");
+        assert_eq!(snap.status, ChannelStatus::Unknown);
+        assert!(snap.last_error.is_none());
     }
 }

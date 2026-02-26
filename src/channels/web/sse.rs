@@ -119,6 +119,7 @@ impl SseManager {
                     SseEvent::JobToolResult { .. } => "job_tool_result",
                     SseEvent::JobStatus { .. } => "job_status",
                     SseEvent::JobResult { .. } => "job_result",
+                    SseEvent::ChannelHealth { .. } => "channel_health",
                     SseEvent::Heartbeat => "heartbeat",
                 };
                 Ok(Event::default().event(event_type).data(data))

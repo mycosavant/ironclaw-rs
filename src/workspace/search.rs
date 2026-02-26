@@ -153,7 +153,7 @@ pub fn reciprocal_rank_fusion(
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
-}
+    }
 
     let mut chunk_scores: HashMap<Uuid, ChunkInfo> = HashMap::new();
 

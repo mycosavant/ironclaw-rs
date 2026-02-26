@@ -164,6 +164,10 @@ pub enum SseEvent {
     },
     #[serde(rename = "heartbeat")]
     Heartbeat,
+    #[serde(rename = "channel_health")]
+    ChannelHealth {
+        channels: Vec<crate::channels::ChannelHealthSnapshot>,
+    },
 
     // Sandbox job streaming events (worker + Claude Code bridge)
     #[serde(rename = "job_message")]
@@ -604,6 +608,7 @@ impl WsServerMessage {
             SseEvent::AuthCompleted { .. } => "auth_completed",
             SseEvent::Error { .. } => "error",
             SseEvent::Heartbeat => "heartbeat",
+            SseEvent::ChannelHealth { .. } => "channel_health",
             SseEvent::JobMessage { .. } => "job_message",
             SseEvent::JobToolUse { .. } => "job_tool_use",
             SseEvent::JobToolResult { .. } => "job_tool_result",
@@ -706,6 +711,23 @@ pub struct SettingsImportRequest {
 #[derive(Debug, Serialize)]
 pub struct SettingsExportResponse {
     pub settings: std::collections::HashMap<String, serde_json::Value>,
+}
+
+// --- Channel Health ---
+
+#[derive(Debug, Serialize)]
+pub struct ChannelHealthResponse {
+    pub channels: Vec<crate::channels::ChannelHealthSnapshot>,
+    pub summary: ChannelHealthSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelHealthSummary {
+    pub total: usize,
+    pub healthy: usize,
+    pub degraded: usize,
+    pub failed: usize,
+    pub unknown: usize,
 }
 
 // --- Health ---
@@ -1047,5 +1069,38 @@ mod tests {
         let json = r#"{"extension_name":"telegram"}"#;
         let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.extension_name, "telegram");
+    }
+
+    // ---- Channel health event tests ----
+
+    #[test]
+    fn test_sse_channel_health_serialize() {
+        let event = SseEvent::ChannelHealth {
+            channels: vec![crate::channels::ChannelHealthSnapshot {
+                name: "telegram".to_string(),
+                status: crate::channels::ChannelStatus::Healthy,
+                consecutive_failures: 0,
+                last_checked: chrono::Utc::now(),
+                last_transition: chrono::Utc::now(),
+                last_error: None,
+            }],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "channel_health");
+        assert_eq!(parsed["channels"][0]["name"], "telegram");
+        assert_eq!(parsed["channels"][0]["status"], "healthy");
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_channel_health() {
+        let sse = SseEvent::ChannelHealth { channels: vec![] };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, .. } => {
+                assert_eq!(event_type, "channel_health");
+            }
+            _ => panic!("Expected Event variant"),
+        }
     }
 }

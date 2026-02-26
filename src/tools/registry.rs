@@ -15,6 +15,8 @@ use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+#[cfg(feature = "media")]
+use crate::tools::builtin::ImageAnalyzeTool;
 use crate::tools::builtin::{
     ApplyPatchTool, AudioTranscribeTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool,
     ImageConvertTool, ImageResizeTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
@@ -23,8 +25,6 @@ use crate::tools::builtin::{
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
-#[cfg(feature = "media")]
-use crate::tools::builtin::ImageAnalyzeTool;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{

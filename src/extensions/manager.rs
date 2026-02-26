@@ -31,8 +31,8 @@ use crate::tools::mcp::auth::{
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
-use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 use crate::tools::wasm::signature::{DownloadVerification, TrustedKeyStore};
+use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
 /// Pending OAuth authorization state.
 struct PendingAuth {
@@ -674,8 +674,14 @@ impl ExtensionManager {
         capabilities_url: Option<&str>,
         verification: Option<DownloadVerification>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir, verification.as_ref())
-            .await?;
+        self.download_and_install_wasm(
+            name,
+            url,
+            capabilities_url,
+            &self.wasm_tools_dir,
+            verification.as_ref(),
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -691,8 +697,14 @@ impl ExtensionManager {
         capabilities_url: Option<&str>,
         verification: Option<DownloadVerification>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_channels_dir, verification.as_ref())
-            .await?;
+        self.download_and_install_wasm(
+            name,
+            url,
+            capabilities_url,
+            &self.wasm_channels_dir,
+            verification.as_ref(),
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -789,7 +801,10 @@ impl ExtensionManager {
                     error = %e,
                     "WASM download failed integrity check"
                 );
-                ExtensionError::InstallFailed(format!("Integrity check failed for '{}': {}", name, e))
+                ExtensionError::InstallFailed(format!(
+                    "Integrity check failed for '{}': {}",
+                    name, e
+                ))
             })?;
 
             tracing::debug!(extension = %name, "SHA-256 hash verified");
@@ -813,7 +828,10 @@ impl ExtensionManager {
                         error = %e,
                         "WASM signature verification failed"
                     );
-                    ExtensionError::InstallFailed(format!("Signature verification failed for '{}': {}", name, e))
+                    ExtensionError::InstallFailed(format!(
+                        "Signature verification failed for '{}': {}",
+                        name, e
+                    ))
                 })?;
 
                 tracing::info!(extension = %name, "Ed25519 signature verified");

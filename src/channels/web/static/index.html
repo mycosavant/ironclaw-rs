@@ -41,6 +41,7 @@
       <button data-tab="memory">Memory</button>
       <button data-tab="jobs">Jobs</button>
       <button data-tab="routines">Routines</button>
+      <button data-tab="channels">Channels</button>
       <button data-tab="extensions">Extensions</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
@@ -183,6 +184,16 @@
           No routines configured. Ask the assistant to create one.
         </div>
         <div class="routine-detail" id="routine-detail" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Channels Tab -->
+    <div class="tab-panel" id="tab-channels">
+      <div class="channels-container">
+        <div class="channels-summary" id="channels-summary"></div>
+        <div class="channels-grid" id="channels-grid">
+          <div class="empty-state">Loading channel health...</div>
+        </div>
       </div>
     </div>
 

@@ -63,6 +63,7 @@ async fn start_test_server() -> (
         heartbeat_last_tick: None,
         routine_last_tick: None,
         repair_last_tick: None,
+        channel_health: None,
         session_store: ironclaw::channels::web::session_store::new_session_store(),
     });
 

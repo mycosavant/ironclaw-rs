@@ -341,7 +341,7 @@ async fn channel_status(
         }
     }
 
-    // Authenticated status (channel connections)
+    // Authenticated status (channel connections + per-channel health)
     if let Some(ref tok) = auth_token {
         match client
             .get(format!("{}/api/gateway/status", base_url))
@@ -374,6 +374,46 @@ async fn channel_status(
             _ => {
                 println!("(Set GATEWAY_AUTH_TOKEN for detailed connection counts)");
             }
+        }
+
+        // Per-channel health from health monitor
+        match client
+            .get(format!("{}/api/channels", base_url))
+            .bearer_auth(tok)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(json) = r.json::<serde_json::Value>().await
+                    && let Some(channels) = json.get("channels").and_then(|v| v.as_array())
+                {
+                    if channels.is_empty() {
+                        println!("\nChannel health: no data yet (monitor may not have ticked)");
+                    } else {
+                        println!("\nChannel health:");
+                        for ch in channels {
+                            let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                            let status = ch
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let emoji = match status {
+                                "healthy" => "●",
+                                "degraded" => "◐",
+                                "failed" => "○",
+                                _ => "?",
+                            };
+                            let error_suffix = ch
+                                .get("last_error")
+                                .and_then(|v| v.as_str())
+                                .map(|e| format!(" — {}", e))
+                                .unwrap_or_default();
+                            println!("  {} {} ({}){}", emoji, name, status, error_suffix);
+                        }
+                    }
+                }
+            }
+            _ => {} // silently skip if endpoint not available
         }
     } else {
         println!("(Set GATEWAY_AUTH_TOKEN for detailed connection counts)");
