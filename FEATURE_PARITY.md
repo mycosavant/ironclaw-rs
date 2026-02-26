@@ -448,8 +448,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Exec approvals                     | ✅       | ✅       | TUI overlay                                                                                       |
 | TLS 1.3 minimum                    | ✅       | ✅       | reqwest rustls                                                                                    |
 | SSRF protection                    | ✅       | ✅       | WASM allowlist                                                                                    |
-| SSRF IPv6 transition bypass block  | ✅       | ❌       | Block IPv4-mapped IPv6 bypasses                                                                   |
-| Cron webhook SSRF guard            | ✅       | ❌       | SSRF checks on webhook delivery                                                                   |
+| SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                     |
+| Cron webhook SSRF guard            | ✅       | ✅       | dispatch_client_for_target in hooks/bundled.rs (DNS resolve + IP blocklist)                       |
 | Loopback-first                     | ✅       | 🚧       | HTTP binds 0.0.0.0                                                                                |
 | Docker sandbox                     | ✅       | ✅       | Orchestrator/worker containers                                                                    |
 | Podman support                     | ✅       | ❌       | Alternative to Docker                                                                             |

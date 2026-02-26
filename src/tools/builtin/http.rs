@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,21 +116,78 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
 
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
-        }
+        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
         IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (::ffff:0:0/96) — e.g. ::ffff:192.168.1.1
+            // These are IPv6 representations of IPv4 addresses and can be used
+            // to bypass IPv6-only blocklist checks while actually reaching
+            // private IPv4 infrastructure (SSRF via IPv6 transition mechanism).
+            if let Some(mapped) = ipv4_mapped_from_ipv6(v6) {
+                return is_disallowed_ipv4(&mapped);
+            }
+
             v6.is_loopback()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
                 || v6.is_multicast()
                 || v6.is_unspecified()
+                // Documentation range (2001:db8::/32) — RFC 3849.
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
         }
+    }
+}
+
+/// Check a decoded IPv4 address against all disallowed ranges.
+fn is_disallowed_ipv4(v4: &Ipv4Addr) -> bool {
+    if v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_multicast()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+    {
+        return true;
+    }
+
+    let o = v4.octets();
+
+    // Cloud metadata endpoint (169.254.169.254) is already covered by link_local,
+    // but add an explicit check as a belt-and-suspenders guard.
+    if o == [169, 254, 169, 254] {
+        return true;
+    }
+
+    // Carrier-grade NAT (100.64.0.0/10) — RFC 6598.
+    // This range is non-routable on the public Internet but reachable from
+    // within the host network; block it the same as RFC 1918 private space.
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return true;
+    }
+
+    // Benchmark / testing (198.18.0.0/15) — RFC 2544.
+    if o[0] == 198 && (18..=19).contains(&o[1]) {
+        return true;
+    }
+
+    false
+}
+
+/// Decode an IPv4-mapped IPv6 address (::ffff:a.b.c.d).
+///
+/// Returns `Some(v4)` when `v6` is in the ::ffff:0:0/96 range, `None` otherwise.
+/// Used to catch SSRF via IPv6 transition mechanisms (RFC 4291 §2.5.5.2).
+fn ipv4_mapped_from_ipv6(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff {
+        Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            s[6] as u8,
+            (s[7] >> 8) as u8,
+            s[7] as u8,
+        ))
+    } else {
+        None
     }
 }
 
@@ -528,8 +585,70 @@ mod tests {
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
             169, 254, 169, 254
         ))));
-        // Public
+        // Carrier-grade NAT (100.64.0.0/10)
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))));
+        // Benchmark range (198.18.0.0/15)
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(198, 19, 255, 0))));
+        // Public — must NOT be blocked
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+    }
+
+    /// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) must resolve to the IPv4
+    /// check and be blocked if the embedded address is private or special.
+    /// Without this, an attacker can bypass the v4 blocklist by encoding
+    /// `192.168.1.1` as `::ffff:192.168.1.1`.
+    #[test]
+    fn test_is_disallowed_ip_ipv4_mapped_ipv6() {
+        use std::net::Ipv6Addr;
+
+        // ::ffff:192.168.1.1 — private IPv4 inside IPv6 wrapper
+        let private_mapped: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&private_mapped),
+            "IPv4-mapped private address should be blocked"
+        );
+
+        // ::ffff:127.0.0.1 — loopback
+        let loopback_mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&loopback_mapped),
+            "IPv4-mapped loopback should be blocked"
+        );
+
+        // ::ffff:169.254.169.254 — cloud metadata endpoint
+        let metadata_mapped: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&metadata_mapped),
+            "IPv4-mapped cloud metadata should be blocked"
+        );
+
+        // ::ffff:100.64.0.1 — carrier-grade NAT
+        let cgnat_mapped: IpAddr = "::ffff:100.64.0.1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&cgnat_mapped),
+            "IPv4-mapped CGNAT address should be blocked"
+        );
+
+        // ::ffff:8.8.8.8 — public IPv4 must NOT be blocked via IPv6 wrapper
+        let public_mapped: Ipv6Addr = "::ffff:8.8.8.8".parse().unwrap();
+        let ipv6_public = IpAddr::V6(public_mapped);
+        assert!(
+            !is_disallowed_ip(&ipv6_public),
+            "IPv4-mapped public address must NOT be blocked"
+        );
+    }
+
+    /// 2001:db8::/32 documentation range must be blocked (same as RFC 5737 IPv4 doc ranges).
+    #[test]
+    fn test_is_disallowed_ip_ipv6_documentation() {
+        let doc_ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&doc_ipv6),
+            "2001:db8::/32 documentation range should be blocked"
+        );
     }
 
     #[test]
