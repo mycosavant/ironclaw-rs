@@ -341,6 +341,19 @@ Dead code behind the wrong `#[cfg]` gate will only show up when building with a 
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
 
+**Use `AtomicU32` (not `Cell<u32>`) for shared counters:** `Cell<T>` is `!Sync`. Any struct with a `Cell<T>` field cannot be shared across async tasks via `&T`, which means it can't be held in an `Arc<T>` and passed into `tokio::spawn`. Use `AtomicU32` / `AtomicBool` / `AtomicI64` for counters or flags on shared state. This caused a compile error during HVF-3 circuit breaker implementation.
+
+**WASM channels are separate Cargo workspaces:** The crates under `channels-src/*/` (discord, telegram, slack, whatsapp) are **not** part of the main workspace and do not build with `cargo build` / `cargo check` at the repo root. When modifying a channel crate, run checks inside that subdirectory:
+
+```bash
+cd channels-src/discord && cargo check
+cd channels-src/discord && cargo test
+```
+
+Dead code or compile errors in a channel crate will not be caught by the root workspace build.
+
+**Check before implementing:** Before writing a new feature, grep and read the relevant source files to verify it doesn't already exist. Several features tracked as `❌` in `FEATURE_PARITY.md` were found to be fully implemented when the code was read — the only gap was missing documentation. Writing a duplicate implementation wastes time and may introduce subtle divergence.
+
 ## Configuration
 
 Environment variables (see `.env.example`):
