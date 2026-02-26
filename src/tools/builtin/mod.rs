@@ -12,6 +12,7 @@ pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
+pub mod vision;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -34,6 +35,8 @@ pub use routine::{
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
+#[cfg(feature = "media")]
+pub use vision::ImageAnalyzeTool;
 
 mod html_converter;
 

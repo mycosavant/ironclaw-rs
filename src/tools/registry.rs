@@ -23,6 +23,8 @@ use crate::tools::builtin::{
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
+#[cfg(feature = "media")]
+use crate::tools::builtin::ImageAnalyzeTool;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
@@ -54,6 +56,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_convert",
     "pdf_extract_text",
     "audio_transcribe",
+    "image_analyze",
     "list_jobs",
     "job_status",
     "cancel_job",
@@ -286,6 +289,18 @@ impl ToolRegistry {
         self.register_sync(Arc::new(AudioTranscribeTool));
 
         tracing::info!("Registered 5 media pipeline tools");
+    }
+
+    /// Register vision analysis tool backed by the given LLM provider.
+    ///
+    /// The `image_analyze` tool uses the LLM's vision capability to answer
+    /// questions about local images.  Requires a vision-capable model.
+    ///
+    /// Call this after `register_media_tools()` to enable vision features.
+    #[cfg(feature = "media")]
+    pub fn register_vision_tools(&self, llm: Arc<dyn LlmProvider>) {
+        self.register_sync(Arc::new(ImageAnalyzeTool::new(llm)));
+        tracing::info!("Registered 1 vision tool (image_analyze)");
     }
 
     /// Register memory tools with a workspace.

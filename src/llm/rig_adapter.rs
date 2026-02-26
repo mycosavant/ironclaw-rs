@@ -632,6 +632,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: crate::llm::Role::Tool,
             content: "result text".to_string(),
+            content_parts: None,
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
@@ -781,6 +782,7 @@ mod tests {
         let tool_result_msg = ChatMessage {
             role: crate::llm::Role::Tool,
             content: "search results here".to_string(),
+            content_parts: None,
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,

@@ -606,8 +606,9 @@ struct ChatCompletionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatCompletionMessage {
     role: String,
+    /// Plain string for text messages; JSON array of content parts for vision messages.
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -775,10 +776,8 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
                 // Convert assistant tool_calls into descriptive text
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(ref text) = msg.content
-                    && !text.is_empty()
-                {
-                    parts.push(text.clone());
+                if let Some(text) = msg.content.as_ref().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    parts.push(text.to_string());
                 }
                 for tc in calls {
                     parts.push(format!(
@@ -788,8 +787,7 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
                 }
                 ChatCompletionMessage {
                     role: "assistant".to_string(),
-                    content: Some(parts.join("\n")),
-
+                    content: Some(serde_json::Value::String(parts.join("\n"))),
                     tool_call_id: None,
                     name: None,
                     tool_calls: None,
@@ -797,10 +795,13 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             } else if msg.role == "tool" {
                 // Convert tool result into a user message
                 let tool_name = msg.name.as_deref().unwrap_or("unknown");
-                let result = msg.content.as_deref().unwrap_or("");
+                let result = msg.content.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 ChatCompletionMessage {
                     role: "user".to_string(),
-                    content: Some(format!("[Tool `{}` returned: {}]", tool_name, result)),
+                    content: Some(serde_json::Value::String(format!(
+                        "[Tool `{}` returned: {}]",
+                        tool_name, result
+                    ))),
 
                     tool_call_id: None,
                     name: None,
@@ -836,10 +837,19 @@ impl From<ChatMessage> for ChatCompletionMessage {
                 .collect()
         });
 
-        let content = if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
+        // For vision messages, serialise content_parts as a JSON array
+        // (OpenAI multi-modal content format).  For all other messages, fall
+        // back to a plain string value.  Assistant messages that are solely
+        // tool-call placeholders have null content in the wire format.
+        let content = if let Some(parts) = msg.content_parts {
+            Some(
+                serde_json::to_value(&parts)
+                    .unwrap_or(serde_json::Value::String(msg.content)),
+            )
+        } else if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
             None
         } else {
-            Some(msg.content)
+            Some(serde_json::Value::String(msg.content))
         };
 
         Self {
@@ -1006,7 +1016,7 @@ mod tests {
         let msg = ChatMessage::user("Hello");
         let chat_msg: ChatCompletionMessage = msg.into();
         assert_eq!(chat_msg.role, "user");
-        assert_eq!(chat_msg.content, Some("Hello".to_string()));
+        assert_eq!(chat_msg.content, Some(serde_json::Value::String("Hello".to_string())));
     }
 
     #[test]
@@ -1080,14 +1090,14 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "system".to_string(),
-                content: Some("You are helpful.".to_string()),
+                content: Some(serde_json::Value::String("You are helpful.".to_string())),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
             },
             ChatCompletionMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(serde_json::Value::String("Hello".to_string())),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
@@ -1104,7 +1114,7 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "user".to_string(),
-                content: Some("test".to_string()),
+                content: Some(serde_json::Value::String("test".to_string())),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
@@ -1125,7 +1135,7 @@ mod tests {
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("hi".to_string()),
+                content: Some(serde_json::Value::String("hi".to_string())),
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("echo".to_string()),
                 tool_calls: None,
@@ -1142,6 +1152,7 @@ mod tests {
             result[1]
                 .content
                 .as_ref()
+                .and_then(|v| v.as_str())
                 .unwrap()
                 .contains("[Called tool `echo`")
         );
@@ -1153,6 +1164,7 @@ mod tests {
             result[2]
                 .content
                 .as_ref()
+                .and_then(|v| v.as_str())
                 .unwrap()
                 .contains("[Tool `echo` returned: hi]")
         );
@@ -1163,7 +1175,7 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some("Let me check that.".to_string()),
+                content: Some(serde_json::Value::String("Let me check that.".to_string())),
                 tool_call_id: None,
                 name: None,
                 tool_calls: Some(vec![ChatCompletionToolCall {
@@ -1177,7 +1189,7 @@ mod tests {
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("found it".to_string()),
+                content: Some(serde_json::Value::String("found it".to_string())),
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("search".to_string()),
                 tool_calls: None,
@@ -1185,7 +1197,7 @@ mod tests {
         ];
 
         let result = flatten_tool_messages(messages);
-        let text = result[0].content.as_ref().unwrap();
+        let text = result[0].content.as_ref().and_then(|v| v.as_str()).unwrap();
         assert!(text.starts_with("Let me check that."));
         assert!(text.contains("[Called tool `search`"));
     }

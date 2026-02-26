@@ -341,6 +341,8 @@ impl AppBuilder {
         };
         tools.register_builtin_tools();
         tools.register_media_tools();
+        #[cfg(feature = "media")]
+        tools.register_vision_tools(Arc::clone(llm));
 
         // Create embeddings provider using the unified method
         let embeddings = self

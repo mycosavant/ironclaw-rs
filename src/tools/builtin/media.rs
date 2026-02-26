@@ -40,7 +40,10 @@ const MAX_PDF_OUTPUT_CHARS: usize = 128 * 1024;
 /// 1. Absolute paths must live inside `base_dir` (if provided).
 /// 2. Relative paths are resolved against `base_dir` (if provided) or CWD.
 /// 3. Lexical `..` components are blocked — they cannot escape the base.
-fn resolve_safe_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+pub(crate) fn resolve_safe_path(
+    path_str: &str,
+    base_dir: Option<&Path>,
+) -> Result<PathBuf, ToolError> {
     if path_str.is_empty() {
         return Err(ToolError::InvalidParameters("path cannot be empty".into()));
     }
@@ -856,7 +859,7 @@ impl Tool for AudioTranscribeTool {
 /// Return the workspace base directory from the `WORKSPACE_DIR` env var,
 /// falling back to `~/.ironclaw/workspace`. Returns `None` if the path cannot
 /// be determined (tools fall back to CWD-relative resolution).
-fn workspace_base() -> Result<Option<PathBuf>, ToolError> {
+pub(crate) fn workspace_base() -> Result<Option<PathBuf>, ToolError> {
     if let Ok(val) = std::env::var("WORKSPACE_DIR") {
         let p = PathBuf::from(val);
         return Ok(Some(p));
@@ -870,7 +873,7 @@ fn workspace_base() -> Result<Option<PathBuf>, ToolError> {
 }
 
 #[cfg(feature = "media")]
-fn detect_mime(bytes: &[u8], path: &Path) -> String {
+pub(crate) fn detect_mime(bytes: &[u8], path: &Path) -> String {
     // Magic-byte based detection first.
     if let Some(kind) = infer::get(bytes) {
         return kind.mime_type().to_owned();

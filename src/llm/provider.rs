@@ -6,6 +6,70 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 
+
+// ── Multi-modal content types ─────────────────────────────────────────────────
+
+/// Image URL descriptor for multi-modal messages.
+///
+/// The `url` may be a regular `https://` URL or a `data:image/...;base64,...`
+/// data URI for inline base64-encoded images.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageUrl {
+    /// HTTP(S) or data-URI for the image.
+    pub url: String,
+    /// Detail level hint: `"auto"` (default), `"low"`, or `"high"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// A single content part within a multi-modal user or system message.
+///
+/// Serialises to the OpenAI multi-modal content-array format:
+/// `{"type": "text", "text": "…"}` or
+/// `{"type": "image_url", "image_url": {"url": "…", "detail": "…"}}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    /// Plain text segment.
+    Text {
+        text: String,
+    },
+    /// An image, identified by URL or inline data-URI.
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+}
+
+impl ContentPart {
+    /// Create a text part.
+    pub fn text(s: impl Into<String>) -> Self {
+        ContentPart::Text { text: s.into() }
+    }
+
+    /// Create an image part from an HTTPS URL.
+    pub fn image_url(url: impl Into<String>) -> Self {
+        ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: url.into(),
+                detail: None,
+            },
+        }
+    }
+
+    /// Create an image part from raw bytes, base64-encoded inline.
+    ///
+    /// `media_type` should be a MIME type such as `"image/png"` or `"image/jpeg"`.
+    pub fn image_base64(media_type: impl Into<String>, data: &[u8]) -> Self {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+        ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: format!("data:{};base64,{}", media_type.into(), b64),
+                detail: Some("auto".into()),
+            },
+        }
+    }
+}
+
 /// Role in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -17,10 +81,21 @@ pub enum Role {
 }
 
 /// A message in a conversation.
+///
+/// For multi-modal messages (text + images), populate `content_parts` instead of
+/// `content`. Providers that support vision (NearAI, OpenAI) will serialise the
+/// parts array; text-only providers fall back to concatenating text parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
+    /// Plain-text content for text-only messages.
     pub content: String,
+    /// Rich content parts for multi-modal messages (text + images).
+    ///
+    /// When `Some`, providers that support vision use this instead of `content`.
+    /// Text-only providers concatenate all `ContentPart::Text` segments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
     /// Tool call ID if this is a tool result message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -39,6 +114,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: content.into(),
+            content_parts: None,
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -50,6 +126,27 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.into(),
+            content_parts: None,
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create a multi-modal user message with text and image parts.
+    ///
+    /// The `text` becomes a leading `ContentPart::Text`, followed by the
+    /// provided image parts. Providers that support vision serialise this as
+    /// the OpenAI content-array format; text-only providers fall back to `text`.
+    pub fn user_multimodal(text: impl Into<String>, images: Vec<ContentPart>) -> Self {
+        let text_str = text.into();
+        let mut parts = Vec::with_capacity(1 + images.len());
+        parts.push(ContentPart::text(text_str.clone()));
+        parts.extend(images);
+        Self {
+            role: Role::User,
+            content: text_str,
+            content_parts: Some(parts),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -61,6 +158,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            content_parts: None,
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -75,6 +173,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.unwrap_or_default(),
+            content_parts: None,
             tool_call_id: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -94,6 +193,7 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: content.into(),
+            content_parts: None,
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
