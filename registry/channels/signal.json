@@ -1,0 +1,31 @@
+{
+  "name": "signal",
+  "display_name": "Signal",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Signal Messenger channel via self-hosted signal-cli REST API (polling mode)",
+  "keywords": ["messaging", "signal", "chat", "private", "encrypted"],
+
+  "source": {
+    "dir": "channels-src/signal",
+    "capabilities": "signal.capabilities.json",
+    "crate_name": "signal-channel"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/signal-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "manual",
+    "provider": "signal-cli REST API",
+    "secrets": ["signal_api_url", "signal_number"],
+    "shared_auth": null,
+    "setup_url": "https://github.com/bbernhard/signal-cli-rest-api"
+  },
+
+  "tags": ["messaging", "privacy"]
+}

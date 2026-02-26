@@ -69,8 +69,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WhatsApp      | ✅       | ❌       | P3       | Baileys (Web), same-phone mode with echo detection               |
 | Telegram      | ✅       | ✅       | -        | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord       | ✅       | ❌       | P2       | discord.js, thread parent binding inheritance                    |
-| Signal        | ✅       | ❌       | P1       | signal-cli                                                       |
-| Slack         | ✅       | ✅       | -        | WASM tool                                                        |
+| Signal        | ✅       | ✅       | -        | signal-cli REST API, WASM channel, polling mode                  |
+| Slack         | ✅       | ✅       | -        | WASM channel, streaming draft replies (on_status Thinking)       |
 | iMessage      | ✅       | ❌       | P3       | BlueBubbles or Linq recommended                                  |
 | Linq          | ✅       | ❌       | P3       | Real iMessage via API, no Mac required                           |
 | Feishu/Lark   | ✅       | ❌       | P3       | Bitable create app/field tools                                   |
@@ -513,7 +513,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Gateway control plane + WebSocket
 - ✅ Web Control UI (chat, memory, jobs, logs, extensions, routines)
 - ✅ WebChat channel (web gateway)
-- ✅ Slack channel (WASM tool)
+- ✅ Slack channel (WASM channel, streaming draft replies via chat.update)
 - ✅ Telegram channel (WASM tool, MTProto)
 - ✅ Docker sandbox (orchestrator/worker)
 - ✅ Cron job scheduling (routines)
@@ -528,9 +528,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### P1 - High Priority
 
-- ❌ Slack channel (real implementation)
+- ✅ Slack channel (WASM channel, streaming draft replies via chat.update)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
-- ❌ Signal channel
+- ✅ Signal channel (WASM channel, signal-cli REST API, polling, pairing, typing indicator)
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 

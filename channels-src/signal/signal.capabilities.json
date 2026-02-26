@@ -1,0 +1,46 @@
+{
+  "type": "channel",
+  "name": "signal",
+  "description": "Signal Messenger channel via self-hosted signal-cli REST API",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "signal_api_url",
+        "prompt": "Enter the base URL of your signal-cli REST API (e.g. http://localhost:8080)",
+        "optional": false
+      },
+      {
+        "name": "signal_number",
+        "prompt": "Enter the registered Signal phone number (E.164 format, e.g. +12345678900)",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "*", "path_prefix": "/" }],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["signal_*"]
+    },
+    "channel": {
+      "allowed_paths": [],
+      "allow_polling": true,
+      "workspace_prefix": "channels/signal/",
+      "emit_rate_limit": {
+        "messages_per_minute": 60,
+        "messages_per_hour": 1000
+      }
+    }
+  },
+  "config": {
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": [],
+    "poll_interval_ms": 30000
+  }
+}

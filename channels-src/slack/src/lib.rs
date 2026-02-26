@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // Re-export generated types
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusUpdate,
+    OutgoingHttpResponse, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -104,14 +104,46 @@ struct SlackPostMessageResponse {
     ts: Option<String>,
 }
 
+/// Slack API response for chat.update.
+#[derive(Debug, Deserialize)]
+struct SlackUpdateResponse {
+    ok: bool,
+    error: Option<String>,
+}
+
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 /// Workspace path for persisting dm_policy across WASM callbacks.
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Namespace for per-conversation draft-state entries.
+const DRAFT_STATE_PREFIX: &str = "state/drafts";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
+
+/// State stored in workspace when a "thinking…" placeholder is posted.
+///
+/// Keyed by [`draft_key`]. Consumed (and deleted) by `on_respond` to update
+/// the placeholder with the real response via `chat.update`.
+#[derive(Debug, Serialize, Deserialize)]
+struct SlackDraftState {
+    /// `ts` of the placeholder message returned by `chat.postMessage`.
+    ts: String,
+    /// Thread `ts` if the conversation is inside a thread.
+    thread_ts: Option<String>,
+}
+
+/// Workspace key for the pending draft message for a given channel + thread context.
+///
+/// DM conversations use `state/drafts/{channel_id}`.
+/// Threaded channel conversations use `state/drafts/{channel_id}/{thread_ts}`.
+fn draft_key(channel: &str, thread_ts: Option<&str>) -> String {
+    match thread_ts {
+        Some(ts) if !ts.is_empty() => format!("{}/{}/{}", DRAFT_STATE_PREFIX, channel, ts),
+        _ => format!("{}/{}", DRAFT_STATE_PREFIX, channel),
+    }
+}
 
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
@@ -238,77 +270,211 @@ impl Guest for SlackChannel {
         let metadata: SlackMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Build Slack API request
-        let mut payload = serde_json::json!({
-            "channel": metadata.channel,
-            "text": response.content,
-        });
+        let thread_ts: Option<String> = response.thread_id.clone().or(metadata.thread_ts.clone());
+        let key = draft_key(&metadata.channel, thread_ts.as_deref());
 
-        // Add thread_ts for threaded replies
-        if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
-            payload["thread_ts"] = serde_json::Value::String(thread_ts);
-        }
+        // Check for a pending draft placeholder posted during on_status(Thinking).
+        // If one exists, update it in-place via chat.update instead of posting a new message.
+        let pending_draft: Option<SlackDraftState> =
+            channel_host::workspace_read(&key).and_then(|s| serde_json::from_str(&s).ok());
 
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+        if let Some(draft) = pending_draft {
+            // Update the placeholder with the real response.
+            let update_result =
+                slack_update_message(&metadata.channel, &draft.ts, &response.content);
+            // Always clear the draft state regardless of update success.
+            let _ = channel_host::workspace_write(&key, "");
 
-        // Make HTTP request to Slack API
-        // The bot token is injected by the host based on credential configuration
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
-
-        let result = channel_host::http_request(
-            "POST",
-            "https://slack.com/api/chat.postMessage",
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
-
-        match result {
-            Ok(http_response) => {
-                if http_response.status != 200 {
-                    return Err(format!(
-                        "Slack API returned status {}",
-                        http_response.status
-                    ));
+            match update_result {
+                Ok(()) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Updated placeholder in channel {} (ts={})",
+                            metadata.channel, draft.ts
+                        ),
+                    );
+                    return Ok(());
                 }
-
-                // Parse Slack response
-                let slack_response: SlackPostMessageResponse =
-                    serde_json::from_slice(&http_response.body)
-                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
-
-                if !slack_response.ok {
-                    return Err(format!(
-                        "Slack API error: {}",
-                        slack_response
-                            .error
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
+                Err(e) => {
+                    // Update failed — fall through and post a new message.
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "chat.update failed ({}), falling back to chat.postMessage",
+                            e
+                        ),
+                    );
                 }
-
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Posted message to Slack channel {}: ts={}",
-                        metadata.channel,
-                        slack_response.ts.unwrap_or_default()
-                    ),
-                );
-
-                Ok(())
             }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
         }
+
+        // No pending draft (or update failed): post a new message.
+        slack_post_message(&metadata.channel, &response.content, thread_ts.as_deref()).map(|_| ())
     }
 
-    fn on_status(_update: StatusUpdate) {}
+    fn on_status(update: StatusUpdate) {
+        // Only act on the first `Thinking` event per conversation context.
+        // Subsequent thinking ticks are no-ops; Done/Interrupted are handled
+        // implicitly when on_respond is called.
+        if update.status != StatusType::Thinking {
+            return;
+        }
+
+        let metadata: SlackMessageMetadata = match serde_json::from_str(&update.metadata_json) {
+            Ok(m) => m,
+            Err(_) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    "on_status: no valid Slack metadata, skipping",
+                );
+                return;
+            }
+        };
+
+        let thread_ts = metadata.thread_ts.clone();
+        let key = draft_key(&metadata.channel, thread_ts.as_deref());
+
+        // Only post a draft if there isn't already one pending.
+        let already_pending = channel_host::workspace_read(&key)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        if already_pending {
+            return;
+        }
+
+        // Post the "thinking…" placeholder.
+        match slack_post_message(&metadata.channel, "⏳ Thinking…", thread_ts.as_deref()) {
+            Ok(ts) => {
+                let state = SlackDraftState {
+                    ts,
+                    thread_ts: thread_ts.clone(),
+                };
+                if let Ok(state_json) = serde_json::to_string(&state) {
+                    let _ = channel_host::workspace_write(&key, &state_json);
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Posted thinking placeholder in channel {}",
+                            metadata.channel
+                        ),
+                    );
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Failed to post thinking placeholder: {}", e),
+                );
+            }
+        }
+    }
 
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
     }
+}
+
+// ============================================================================
+// Slack API Helpers
+// ============================================================================
+
+/// Post a new message via chat.postMessage.
+///
+/// Returns the message timestamp (`ts`) on success.
+fn slack_post_message(
+    channel: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+) -> Result<String, String> {
+    let mut payload = serde_json::json!({
+        "channel": channel,
+        "text": text,
+    });
+
+    if let Some(ts) = thread_ts {
+        if !ts.is_empty() {
+            payload["thread_ts"] = serde_json::Value::String(ts.to_string());
+        }
+    }
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let http_response = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/chat.postMessage",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if http_response.status != 200 {
+        return Err(format!(
+            "Slack API returned status {}",
+            http_response.status
+        ));
+    }
+
+    let resp: SlackPostMessageResponse = serde_json::from_slice(&http_response.body)
+        .map_err(|e| format!("Failed to parse postMessage response: {}", e))?;
+
+    if !resp.ok {
+        return Err(format!(
+            "chat.postMessage error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    Ok(resp.ts.unwrap_or_default())
+}
+
+/// Update an existing message via chat.update.
+///
+/// Used to replace the "thinking…" placeholder with the real response.
+fn slack_update_message(channel: &str, ts: &str, text: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "channel": channel,
+        "ts": ts,
+        "text": text,
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let http_response = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/chat.update",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if http_response.status != 200 {
+        return Err(format!(
+            "Slack API returned status {}",
+            http_response.status
+        ));
+    }
+
+    let resp: SlackUpdateResponse = serde_json::from_slice(&http_response.body)
+        .map_err(|e| format!("Failed to parse chat.update response: {}", e))?;
+
+    if !resp.ok {
+        return Err(format!(
+            "chat.update error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    Ok(())
 }
 
 /// Handle a Slack event and emit message if applicable.
@@ -444,8 +610,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed =
-        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
 
     if is_allowed {
         return true;
@@ -463,10 +628,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(channel_id, &result.code);
@@ -485,38 +647,11 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
 
 /// Send a pairing code message via Slack chat.postMessage.
 fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "channel": channel_id,
-        "text": format!(
-            "To pair with this bot, run: `ironclaw pairing approve slack {}`",
-            code
-        ),
-    });
-
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
-
-    let headers = serde_json::json!({"Content-Type": "application/json"});
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://slack.com/api/chat.postMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
-        None,
+    let text = format!(
+        "To pair with this bot, run: `ironclaw pairing approve slack {}`",
+        code
     );
-
-    match result {
-        Ok(response) if response.status == 200 => Ok(()),
-        Ok(response) => {
-            let body_str = String::from_utf8_lossy(&response.body);
-            Err(format!(
-                "Slack API error: {} - {}",
-                response.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
-    }
+    slack_post_message(channel_id, &text, None).map(|_| ())
 }
 
 /// Strip leading bot mention from text.
