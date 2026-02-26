@@ -438,6 +438,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature                            | OpenClaw | IronClaw | Notes                                                                                             |
 | ---------------------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------- |
 | Gateway token auth                 | ✅       | ✅       | Bearer token auth on web gateway                                                                  |
+| Per-session short-lived tokens     | ✅       | ✅       | POST /api/auth/session → opaque 64-hex token; 24h inactivity TTL; max 5 sessions; individual revoke |
 | Device pairing                     | ✅       | ❌       |                                                                                                   |
 | Tailscale identity                 | ✅       | ❌       |                                                                                                   |
 | Trusted-proxy auth                 | ✅       | ❌       | Header-based reverse proxy auth                                                                   |
@@ -463,6 +464,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Path traversal prevention          | ✅       | ✅       | Including config includes (OC-06)                                                                 |
 | Credential theft via env injection | ✅       | 🚧       | Shell env scrubbing + command injection detection; no full OC-09 defense                          |
 | Session file permissions (0o600)   | ✅       | ✅       | Session token file set to 0o600 in llm/session.rs                                                 |
+| Database encryption at rest        | ✅       | ✅       | libSQL: AES-256-CBC (SQLCipher) via `LIBSQL_ENCRYPTION_KEY`; HKDF-SHA256 key derivation           |
 | Skill download path restriction    | ✅       | ❌       | Prevent arbitrary write targets                                                                   |
 | Webhook signature verification     | ✅       | ✅       |                                                                                                   |
 | Media URL validation               | ✅       | ❌       |                                                                                                   |
