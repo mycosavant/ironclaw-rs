@@ -14,7 +14,11 @@ use crate::error::ChannelError;
 /// Includes an injection channel so background tasks (e.g., job monitors) can
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
-    channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    // Stored as `Arc` so `health_check_all` can clone handles, release the
+    // lock, and run checks concurrently without holding the RwLock across
+    // async I/O (which would block writers like `hot_add` for the full
+    // check duration).
+    channels: Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
@@ -42,7 +46,8 @@ impl ChannelManager {
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        self.channels.write().await.insert(name.clone(), channel);
+        let arc: Arc<dyn Channel> = channel.into();
+        self.channels.write().await.insert(name.clone(), arc);
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -53,10 +58,11 @@ impl ChannelManager {
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
         let name = channel.name().to_string();
-        let stream = channel.start().await?;
+        let arc: Arc<dyn Channel> = channel.into();
+        let stream = arc.start().await?;
 
         // Register for respond/broadcast/send_status
-        self.channels.write().await.insert(name.clone(), channel);
+        self.channels.write().await.insert(name.clone(), arc);
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
@@ -191,14 +197,25 @@ impl ChannelManager {
     }
 
     /// Check health of all channels.
+    ///
+    /// Collects `Arc` handles under a brief read lock, releases the lock, then
+    /// runs each health check sequentially outside the lock so that writers
+    /// (e.g. `hot_add`) are never blocked for the full check duration.
     pub async fn health_check_all(&self) -> HashMap<String, Result<(), ChannelError>> {
-        let channels = self.channels.read().await;
-        let mut results = HashMap::new();
+        // Snapshot: clone only the lightweight `Arc`s, not the channels themselves.
+        let handles: Vec<(String, Arc<dyn Channel>)> = self
+            .channels
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect();
+        // Lock is released here — writers can proceed while checks run.
 
-        for (name, channel) in channels.iter() {
-            results.insert(name.clone(), channel.health_check().await);
+        let mut results = HashMap::with_capacity(handles.len());
+        for (name, ch) in handles {
+            results.insert(name, ch.health_check().await);
         }
-
         results
     }
 

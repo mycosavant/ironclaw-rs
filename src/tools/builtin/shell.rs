@@ -1133,9 +1133,12 @@ mod tests {
         assert!(detect_command_injection("host localhost").is_none());
 
         // Words containing "host"/"dig" as substrings must NOT false-positive
-        assert!(detect_command_injection("ghost $(date)").is_none());
-        assert!(detect_command_injection("docker --host myhost $(echo foo)").is_none());
-        assert!(detect_command_injection("digital $(uname)").is_none());
+        // on the DNS-exfiltration check.  Note: we use plain commands here
+        // (no command substitution) because `$(...)` / `` `...` `` are
+        // independently rejected by the substitution guard above.
+        assert!(detect_command_injection("ghost status").is_none());
+        assert!(detect_command_injection("docker --host myhost inspect").is_none());
+        assert!(detect_command_injection("digital clock show").is_none());
     }
 
     #[test]

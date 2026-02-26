@@ -23,7 +23,9 @@ use crate::channels::{
     ChannelHealthMonitor, ChannelManager, HealthMonitorConfig, IncomingMessage, OutgoingResponse,
     StatusUpdate,
 };
-use crate::config::{AgentConfig, ConfigWatcher, HeartbeatConfig, HotReloadConfig, RoutineConfig, SkillsConfig};
+use crate::config::{
+    AgentConfig, ConfigWatcher, HeartbeatConfig, HotReloadConfig, RoutineConfig, SkillsConfig,
+};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
@@ -232,11 +234,9 @@ impl Agent {
 
         // Spawn channel health watchdog — periodically calls health_check on every
         // registered channel and injects system notifications on state transitions.
-        let _health_monitor = ChannelHealthMonitor::new(
-            Arc::clone(&self.channels),
-            HealthMonitorConfig::default(),
-        )
-        .spawn();
+        let _health_monitor =
+            ChannelHealthMonitor::new(Arc::clone(&self.channels), HealthMonitorConfig::default())
+                .spawn();
 
         // Spawn config hot-reload watcher — detects changes to config.toml /
         // settings.json and injects a system notification so the operator knows to
@@ -252,7 +252,10 @@ impl Agent {
                         let msg = IncomingMessage::new(
                             "system",
                             &agent_name,
-                            format!("[config] File changed: {}  (restart may be needed to apply changes)", path_display),
+                            format!(
+                                "[config] File changed: {}  (restart may be needed to apply changes)",
+                                path_display
+                            ),
                         );
                         if inject.send(msg).await.is_err() {
                             break;
@@ -262,7 +265,10 @@ impl Agent {
                 Some(watcher.spawn())
             }
             Err(e) => {
-                tracing::warn!("Config hot-reload unavailable (file watch init failed): {}", e);
+                tracing::warn!(
+                    "Config hot-reload unavailable (file watch init failed): {}",
+                    e
+                );
                 None
             }
         };
@@ -560,6 +566,11 @@ impl Agent {
                             m,
                             p
                         );
+                        // TODO(HOOK_OVERRIDE): applying a live model/provider
+                        // override via hook is not yet implemented.  Switching
+                        // `self.deps.llm` at runtime requires rebuilding the
+                        // provider chain (failover, circuit-breaker, cache)
+                        // and is deferred to a future release.
                     }
                 }
                 Ok(_) => {}

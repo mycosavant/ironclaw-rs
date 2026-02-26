@@ -162,9 +162,27 @@ impl Tool for ImageAnalyzeTool {
             // Validate path is within workspace (same rules as the media tools).
             let abs_path = resolve_safe_path(path_str, base.as_deref())?;
 
+            // Guard against allocating memory for oversized files: check the
+            // OS-reported file size before reading any bytes.  The post-read
+            // length check remains as a defence-in-depth fallback.
+            let metadata = tokio::fs::metadata(&abs_path).await.map_err(|e| {
+                Self::failed(format!(
+                    "failed to stat '{}': {e}",
+                    abs_path.display()
+                ))
+            })?;
+            if metadata.len() as usize > MAX_IMAGE_BYTES {
+                return Err(Self::invalid(format!(
+                    "'{}' is {:.1} MiB; maximum allowed image size is {} MiB",
+                    abs_path.display(),
+                    metadata.len() as f64 / (1024.0 * 1024.0),
+                    MAX_IMAGE_BYTES / (1024 * 1024),
+                )));
+            }
+
             // Read file bytes asynchronously.
             let raw = tokio::fs::read(&abs_path).await.map_err(|e| {
-                Self::failed(format!("failed to read \'{}\': {e}", abs_path.display()))
+                Self::failed(format!("failed to read '{}': {e}", abs_path.display()))
             })?;
 
             // Reject oversized files before encoding.

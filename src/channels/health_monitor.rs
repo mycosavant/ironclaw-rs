@@ -57,6 +57,9 @@ impl Default for HealthMonitorConfig {
 /// Health status of a single channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
+    /// Not yet checked — initial state before the first poll completes.
+    /// This prevents a spurious "recovered" log if the first check succeeds.
+    Unknown,
     Healthy,
     Degraded,
     Failed,
@@ -65,6 +68,7 @@ pub enum ChannelStatus {
 impl ChannelStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::Healthy => "healthy",
             Self::Degraded => "degraded",
             Self::Failed => "failed",
@@ -86,7 +90,7 @@ impl ChannelHealth {
     fn new() -> Self {
         let now = Utc::now();
         Self {
-            status: ChannelStatus::Healthy,
+            status: ChannelStatus::Unknown,
             consecutive_failures: 0,
             last_checked: now,
             last_transition: now,
@@ -138,7 +142,13 @@ impl ChannelHealthMonitor {
 
                 match outcome {
                     Ok(()) => {
-                        let recovered = health.status != ChannelStatus::Healthy;
+                        // "Recovered" only makes sense after a confirmed Degraded/Failed
+                        // state. Unknown (first check) and ongoing Healthy transitions
+                        // must not produce a spurious recovery notification.
+                        let recovered = matches!(
+                            health.status,
+                            ChannelStatus::Degraded | ChannelStatus::Failed
+                        );
                         let prev_failures = health.consecutive_failures;
                         health.consecutive_failures = 0;
 
@@ -208,6 +218,9 @@ impl ChannelHealthMonitor {
                                     notify(&inject, &self.config.notify_user_id, msg).await;
                                 }
                                 ChannelStatus::Healthy => {}
+                                // Unknown is only an initial placeholder; it is never
+                                // assigned as a `new_status` in the failure branch.
+                                ChannelStatus::Unknown => unreachable!("new_status cannot be Unknown"),
                             }
                         } else {
                             // Same state — periodic log at lower severity.
@@ -257,12 +270,15 @@ mod tests {
     #[test]
     fn channel_health_initial_state() {
         let h = ChannelHealth::new();
-        assert_eq!(h.status, ChannelStatus::Healthy);
+        // Initial state is Unknown, not Healthy, so the first successful check
+        // does not emit a spurious "recovered" notification.
+        assert_eq!(h.status, ChannelStatus::Unknown);
         assert_eq!(h.consecutive_failures, 0);
     }
 
     #[test]
     fn channel_status_as_str() {
+        assert_eq!(ChannelStatus::Unknown.as_str(), "unknown");
         assert_eq!(ChannelStatus::Healthy.as_str(), "healthy");
         assert_eq!(ChannelStatus::Degraded.as_str(), "degraded");
         assert_eq!(ChannelStatus::Failed.as_str(), "failed");
@@ -303,8 +319,7 @@ mod tests {
     /// Counter that increments each call to verify async notify sends.
     #[tokio::test]
     async fn notify_sends_message() {
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<IncomingMessage>(8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<IncomingMessage>(8);
         let counter = Arc::new(AtomicU32::new(0));
         let counter2 = Arc::clone(&counter);
 

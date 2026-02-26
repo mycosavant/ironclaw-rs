@@ -46,11 +46,23 @@ impl ContentPart {
         ContentPart::Text { text: s.into() }
     }
 
-    /// Create an image part from an HTTPS URL.
+    /// Create an image part from an HTTPS or data URL.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics in debug builds if `url` does not start with `https://` or
+    /// `data:` to catch accidental `file://` or other local-scheme URLs that
+    /// could be forwarded to a remote LLM API (SSRF-adjacent risk).
     pub fn image_url(url: impl Into<String>) -> Self {
+        let url = url.into();
+        debug_assert!(
+            url.starts_with("https://") || url.starts_with("data:"),
+            "image_url: URL must start with 'https://' or 'data:'; got {:?}",
+            url
+        );
         ContentPart::ImageUrl {
             image_url: ImageUrl {
-                url: url.into(),
+                url,
                 detail: None,
             },
         }

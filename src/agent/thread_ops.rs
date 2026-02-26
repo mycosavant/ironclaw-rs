@@ -471,7 +471,9 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    tracing::debug!(
+                    // Suppression silently drops a DB write; warn so operators
+                    // can detect misconfigured hooks in production logs.
+                    tracing::warn!(
                         "BeforeMessageWrite hook suppressed user message persist: {}",
                         reason
                     );
@@ -531,7 +533,9 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    tracing::debug!(
+                    // Suppression silently drops a DB write; warn so operators
+                    // can detect misconfigured hooks in production logs.
+                    tracing::warn!(
                         "BeforeMessageWrite hook suppressed assistant message persist: {}",
                         reason
                     );

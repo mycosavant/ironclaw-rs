@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use notify::event::{EventKind, ModifyKind};
 use notify::{Event, EventHandler, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -145,14 +145,15 @@ impl ConfigWatcher {
                     });
             }
             // Always watch the parent directory so newly-created files are seen.
-            if let Some(parent) = path.parent() {
-                if parent.exists() && watched.insert(parent.to_path_buf()) {
-                    watcher
-                        .watch(parent, RecursiveMode::NonRecursive)
-                        .unwrap_or_else(|e| {
-                            tracing::debug!(path = %parent.display(), error = %e, "hot_reload: cannot watch directory");
-                        });
-                }
+            if let Some(parent) = path.parent()
+                && parent.exists()
+                && watched.insert(parent.to_path_buf())
+            {
+                watcher
+                    .watch(parent, RecursiveMode::NonRecursive)
+                    .unwrap_or_else(|e| {
+                        tracing::debug!(path = %parent.display(), error = %e, "hot_reload: cannot watch directory");
+                    });
             }
         }
 
@@ -212,9 +213,9 @@ impl EventHandler for DebouncedHandler {
                 .try_lock()
                 .map(|mut map| {
                     let now = std::time::Instant::now();
-                    let last = map.entry(path.clone()).or_insert_with(|| {
-                        now.checked_sub(self.debounce * 2).unwrap_or(now)
-                    });
+                    let last = map
+                        .entry(path.clone())
+                        .or_insert_with(|| now.checked_sub(self.debounce * 2).unwrap_or(now));
                     if now.duration_since(*last) >= self.debounce {
                         *last = now;
                         true
@@ -226,11 +227,24 @@ impl EventHandler for DebouncedHandler {
 
             if should_send {
                 tracing::debug!(path = %path.display(), "hot_reload: config file changed");
-                let ev = ConfigReloadEvent { path };
-                // Use blocking_send since we're on the notify callback thread (not async).
-                if self.tx.blocking_send(ev).is_err() {
-                    // Receiver dropped — stop sending.
-                    return;
+                let ev = ConfigReloadEvent { path: path.clone() };
+                // Use try_send rather than blocking_send: the notify callback
+                // runs on a thread-pool thread, and blocking_send would stall
+                // that thread (and potentially miss further events) if the
+                // 64-slot channel fills up.  A dropped event is harmless — the
+                // debounce timer means the next write will fire another event.
+                match self.tx.try_send(ev) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "hot_reload: channel full, dropping redundant reload event"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        // Receiver dropped — stop sending.
+                        return;
+                    }
                 }
             }
         }
@@ -279,7 +293,11 @@ mod tests {
         };
         let result = ConfigWatcher::new(cfg);
         // Construction should succeed even if the paths don't exist.
-        assert!(result.is_ok(), "Watcher construction failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Watcher construction failed: {:?}",
+            result.err()
+        );
     }
 
     /// End-to-end: write to a temp file and verify a reload event is delivered.
@@ -325,8 +343,7 @@ mod tests {
         assert!(
             is_related,
             "Expected path related to {:?}, got {:?}",
-            file_path,
-            event.path
+            file_path, event.path
         );
     }
 }
