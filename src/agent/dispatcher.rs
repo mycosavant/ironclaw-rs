@@ -14,7 +14,7 @@ use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult, Role};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -29,6 +29,11 @@ pub(super) enum AgenticLoopResult {
     NeedApproval {
         /// The pending approval request to store.
         pending: PendingApproval,
+    },
+    /// The user interrupted the loop.
+    Interrupted {
+        /// Partial response accumulated before interruption, if any.
+        partial: Option<String>,
     },
 }
 
@@ -155,11 +160,20 @@ impl Agent {
                 if let Some(thread) = sess.threads.get(&thread_id)
                     && thread.state == ThreadState::Interrupted
                 {
-                    return Err(crate::error::JobError::ContextError {
-                        id: thread_id,
-                        reason: "Interrupted".to_string(),
-                    }
-                    .into());
+                    // Collect the last assistant message from context as partial
+                    // output so the user can see what was generated before abort.
+                    let partial = context_messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == Role::Assistant)
+                        .and_then(|m| {
+                            if m.content.trim().is_empty() {
+                                None
+                            } else {
+                                Some(m.content.clone())
+                            }
+                        });
+                    return Ok(AgenticLoopResult::Interrupted { partial });
                 }
             }
 

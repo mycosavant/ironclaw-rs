@@ -151,9 +151,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `nodes`                    | ✅       | ❌       | P3       | Device management, remove/clear flows                      |
 | `plugins`                  | ✅       | ❌       | P3       | Plugin management                                          |
 | `hooks`                    | ✅       | ✅       | P2       | Lifecycle hooks                                            |
-| `cron`                     | ✅       | ❌       | P2       | Scheduled jobs (model/thinking fields in edit)             |
+| `cron`                     | ✅       | ✅       | P2       | list/show/add/edit/remove/webhook subcommands               |
 | `webhooks`                 | ✅       | ❌       | P3       | Webhook config                                             |
-| `message send`             | ✅       | ❌       | P2       | Send to channels                                           |
+| `message send`             | ✅       | ✅       | P2       | HTTP POST to running gateway via GATEWAY_AUTH_TOKEN        |
 | `browser`                  | ✅       | ❌       | P3       | Browser automation                                         |
 | `sandbox`                  | ✅       | ✅       | -        | WASM sandbox                                               |
 | `doctor`                   | ✅       | ❌       | P2       | Diagnostics                                                |
@@ -395,7 +395,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Canvas system (A2UI)    | ✅       | ❌       | P3       | Agent-driven UI, improved asset resolution            |
 | Control UI i18n         | ✅       | ❌       | P3       | English, Chinese, Portuguese                          |
 | WebChat theme sync      | ✅       | ❌       | P3       | Sync with system dark/light mode                      |
-| Partial output on abort | ✅       | ❌       | P2       | Preserve partial output when aborting                 |
+| Partial output on abort | ✅       | ✅       | P2       | Last LLM response included with [interrupted] suffix  |
 
 ### Owner: _Unassigned_
 
@@ -539,9 +539,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ❌ Configuration hot-reload
-- ❌ Webhook trigger endpoint in web gateway
+- ✅ Webhook trigger endpoint in web gateway (public /hooks/routine/{path} with HMAC-SHA256)
 - ❌ Channel health monitor with auto-restart
-- ❌ Partial output preservation on abort
+- ✅ Partial output preservation on abort (Interrupted variant with partial content)
 
 ### P3 - Lower Priority
 

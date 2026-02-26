@@ -75,6 +75,18 @@ async fn main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
+        Some(Command::Cron(cron_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return run_cron_command(cron_cmd).await;
+        }
+        Some(Command::Message(msg_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return ironclaw::cli::run_message_command(msg_cmd.clone()).await;
+        }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
@@ -657,6 +669,19 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     ironclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+}
+
+/// Run the Cron CLI subcommand.
+async fn run_cron_command(cron_cmd: &ironclaw::cli::CronCommand) -> anyhow::Result<()> {
+    let config = Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    ironclaw::cli::run_cron_command_with_db(cron_cmd.clone(), db).await
 }
 
 /// Run the Worker subcommand (inside Docker containers).

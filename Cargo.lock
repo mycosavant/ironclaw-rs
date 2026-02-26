@@ -2806,6 +2806,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "html-to-markdown-rs",
  "http-body-util",
  "hyper 1.8.1",

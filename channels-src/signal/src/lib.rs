@@ -149,10 +149,7 @@ const CHANNEL_NAME: &str = "signal";
 /// Returns `Ok(())` if the number looks valid, or an `Err` with a description.
 fn validate_e164(number: &str) -> Result<(), String> {
     if !number.starts_with('+') {
-        return Err(format!(
-            "phone number must start with '+': {}",
-            number
-        ));
+        return Err(format!("phone number must start with '+': {}", number));
     }
     let digits: &str = &number[1..];
     if digits.len() < 7 || digits.len() > 15 {
@@ -241,7 +238,10 @@ impl Guest for SignalChannel {
             channel_host::LogLevel::Info,
             &format!(
                 "Signal channel ready: number={} api_url={} dm_policy={} poll={}ms",
-                redact_phone(&signal_number), api_url, dm_policy, config.poll_interval_ms,
+                redact_phone(&signal_number),
+                api_url,
+                dm_policy,
+                config.poll_interval_ms,
             ),
         );
 
@@ -332,7 +332,9 @@ impl Guest for SignalChannel {
 
         let api_url = channel_host::workspace_read(API_URL_PATH)
             .filter(|s| !s.is_empty())
-            .ok_or("api_url missing from workspace state — channel may not be initialised".to_string())
+            .ok_or(
+                "api_url missing from workspace state — channel may not be initialised".to_string(),
+            )
             .unwrap_or_else(|e| {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
@@ -374,18 +376,17 @@ impl Guest for SignalChannel {
                 return;
             }
         };
-        let signal_number = match channel_host::workspace_read(SIGNAL_NUMBER_PATH)
-            .filter(|s| !s.is_empty())
-        {
-            Some(n) => n,
-            None => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    "Signal on_status: signal_number missing — skipping typing indicator",
-                );
-                return;
-            }
-        };
+        let signal_number =
+            match channel_host::workspace_read(SIGNAL_NUMBER_PATH).filter(|s| !s.is_empty()) {
+                Some(n) => n,
+                None => {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        "Signal on_status: signal_number missing — skipping typing indicator",
+                    );
+                    return;
+                }
+            };
 
         // Best-effort typing indicator via `PUT /v1/typing/{account}`.
         // Older signal-cli versions may not support this; errors are silently
@@ -572,7 +573,10 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
             if !ok {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Signal: DM from {} blocked (not in allowlist)", redact_phone(sender)),
+                    &format!(
+                        "Signal: DM from {} blocked (not in allowlist)",
+                        redact_phone(sender)
+                    ),
                 );
             }
             ok
@@ -597,7 +601,8 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
                         channel_host::LogLevel::Info,
                         &format!(
                             "Signal: pairing request created for {} (code={})",
-                            redact_phone(sender), result.code,
+                            redact_phone(sender),
+                            result.code,
                         ),
                     );
                     if result.created {
@@ -613,7 +618,11 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
                 Err(e) => {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
-                        &format!("Signal: pairing upsert failed for {}: {}", redact_phone(sender), e),
+                        &format!(
+                            "Signal: pairing upsert failed for {}: {}",
+                            redact_phone(sender),
+                            e
+                        ),
                     );
                 }
             }

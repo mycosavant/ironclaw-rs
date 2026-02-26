@@ -304,20 +304,49 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        if thread.state == ThreadState::Interrupted {
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::Status("Interrupted".into()),
-                    &message.metadata,
-                )
-                .await;
-            return Ok(SubmissionResult::Interrupted);
-        }
-
         // Complete, fail, or request approval
         match result {
+            Ok(AgenticLoopResult::Interrupted { partial }) => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Interrupted".into()),
+                        &message.metadata,
+                    )
+                    .await;
+
+                // If there's partial output, emit it so the user can see what
+                // was generated before the interrupt.
+                if let Some(ref content) = partial {
+                    thread.complete_turn(format!("{}\n\n[interrupted]", content));
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.user_id,
+                        &format!("{}\n\n[interrupted]", content),
+                    )
+                    .await;
+                    return Ok(SubmissionResult::response(format!(
+                        "{}\n\n[interrupted]",
+                        content
+                    )));
+                }
+
+                thread.interrupt();
+                Ok(SubmissionResult::Interrupted)
+            }
+            _ if thread.state == ThreadState::Interrupted => {
+                // Fallback: loop returned an error but thread was marked interrupted.
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Interrupted".into()),
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(SubmissionResult::Interrupted)
+            }
             Ok(AgenticLoopResult::Response {
                 text: response,
                 had_high_severity,
@@ -1180,6 +1209,31 @@ impl Agent {
                     thread.fail_turn(e.to_string());
                     // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
+                }
+                Ok(AgenticLoopResult::Interrupted { partial }) => {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Interrupted".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                    if let Some(content) = partial {
+                        thread.complete_turn(format!("{}\n\n[interrupted]", content));
+                        self.persist_assistant_response(
+                            thread_id,
+                            &message.user_id,
+                            &format!("{}\n\n[interrupted]", content),
+                        )
+                        .await;
+                        return Ok(SubmissionResult::response(format!(
+                            "{}\n\n[interrupted]",
+                            content
+                        )));
+                    }
+                    thread.interrupt();
+                    Ok(SubmissionResult::Interrupted)
                 }
             }
         } else {

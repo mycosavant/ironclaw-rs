@@ -152,6 +152,7 @@ wasmparser = "0.220"                                          # WASM binary pars
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+hmac = "0.12"                                                         # HMAC-SHA256 for webhook secret verification
 blake3 = "1"
 rand = "0.8"
 subtle = "2"                                                          # Constant-time comparisons for token validation

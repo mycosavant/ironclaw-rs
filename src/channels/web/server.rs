@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode, header},
     middleware,
@@ -217,7 +218,9 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new().route("/api/health", get(health_handler));
+    let public = Router::new()
+        .route("/api/health", get(health_handler))
+        .route("/hooks/routine/{path}", post(public_webhook_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState {
@@ -2671,6 +2674,131 @@ async fn routines_trigger_handler(
         "status": "triggered",
         "routine_id": routine_id,
     })))
+}
+
+/// Public webhook endpoint — no auth required.
+///
+/// Matches webhook-type routines by the URL path segment, verifies the optional
+/// shared secret, and fires the routine through the standard message pipeline.
+async fn public_webhook_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(webhook_path): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // List all routines for the default user and find one whose webhook path
+    // matches the URL path segment (including literal routine UUID fallback).
+    let routines = store
+        .list_routines(&state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let routine = routines
+        .into_iter()
+        .find(|r| {
+            if let crate::agent::routine::Trigger::Webhook { path, .. } = &r.trigger {
+                let id_str = r.id.to_string();
+                let effective = path.as_deref().unwrap_or(&id_str);
+                effective == webhook_path
+            } else {
+                false
+            }
+        })
+        .ok_or((StatusCode::NOT_FOUND, "No webhook routine found for this path".to_string()))?;
+
+    // Verify shared secret when configured.
+    if let crate::agent::routine::Trigger::Webhook { secret: Some(expected_secret), .. } =
+        &routine.trigger
+    {
+        let verified = verify_webhook_secret(expected_secret, &headers, &body);
+        if !verified {
+            tracing::warn!(
+                routine_id = %routine.id,
+                routine_name = %routine.name,
+                "Webhook secret verification failed"
+            );
+            return Err((StatusCode::UNAUTHORIZED, "Invalid webhook secret".to_string()));
+        }
+    }
+
+    if !routine.enabled {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "Routine is disabled".to_string()));
+    }
+
+    // Fire the routine via the message pipeline.
+    let prompt = match &routine.action {
+        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
+        crate::agent::routine::RoutineAction::FullJob { title, description, .. } => {
+            format!("{}: {}", title, description)
+        }
+    };
+
+    let body_text: String = String::from_utf8_lossy(&body).chars().take(512).collect();
+    let content = if body_text.trim().is_empty() {
+        format!("[routine:{}] {}", routine.name, prompt)
+    } else {
+        format!("[routine:{}] {} | webhook_body: {}", routine.name, prompt, body_text.trim())
+    };
+
+    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+
+    let tx_guard = state.msg_tx.read().await;
+    let tx = tx_guard.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Channel not started".to_string(),
+    ))?;
+
+    tx.send(msg).await.map_err(|_| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Channel closed".to_string(),
+    ))?;
+
+    tracing::info!(
+        routine_id = %routine.id,
+        routine_name = %routine.name,
+        path = %webhook_path,
+        "Webhook triggered routine"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "queued",
+        "routine_id": routine.id,
+        "routine_name": routine.name,
+    })))
+}
+
+/// Verify a webhook secret either as a plain `X-Webhook-Secret` header or as a
+/// GitHub-style `X-Hub-Signature-256: sha256=<hex>` HMAC-SHA256 signature.
+fn verify_webhook_secret(expected_secret: &str, headers: &HeaderMap, body: &Bytes) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use subtle::ConstantTimeEq;
+
+    // 1. Plain secret header.
+    if let Some(val) = headers.get("x-webhook-secret")
+        && let Ok(provided) = val.to_str() {
+            return provided.as_bytes().ct_eq(expected_secret.as_bytes()).into();
+        }
+
+    // 2. GitHub-style HMAC-SHA256 signature.
+    if let Some(sig_header) = headers.get("x-hub-signature-256")
+        && let Ok(sig_str) = sig_header.to_str() {
+            let hex_part = sig_str.strip_prefix("sha256=").unwrap_or(sig_str);
+            if let Ok(provided_bytes) = hex::decode(hex_part) {
+                let mut mac = Hmac::<Sha256>::new_from_slice(expected_secret.as_bytes())
+                    .expect("HMAC accepts any key length");
+                mac.update(body);
+                let computed = mac.finalize().into_bytes();
+                return computed.as_slice().ct_eq(&provided_bytes).into();
+            }
+        }
+
+    false
 }
 
 #[derive(Deserialize)]

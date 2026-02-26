@@ -100,7 +100,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "id_rsa",
         // Shell builtins that replace or source arbitrary code
         "exec ",
-        ". /",  // source from absolute path (dot builtin)
+        ". /", // source from absolute path (dot builtin)
     ]
 });
 
@@ -237,7 +237,13 @@ pub fn detect_command_injection(cmd: &str) -> Option<&'static str> {
     // `str::contains` checks, so "sudo\u{00A0}cat" would bypass "sudo " detection.
     let normalised: String = cmd
         .chars()
-        .map(|c| if c.is_whitespace() && c != ' ' { ' ' } else { c })
+        .map(|c| {
+            if c.is_whitespace() && c != ' ' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let lower = normalised.to_lowercase();
 
@@ -318,7 +324,7 @@ pub fn detect_command_injection(cmd: &str) -> Option<&'static str> {
         && has_command_substitution(&lower)
     {
         return Some("potential DNS exfiltration via command substitution");
-    } 
+    }
 
     // Netcat with data piping (exfiltration channel).
     // Use has_command_token to avoid false positives on words containing
@@ -378,7 +384,10 @@ pub fn validate_workdir(workdir: &str, base_dir: Option<&Path>) -> Result<PathBu
 
     // Block explicit `..` components before canonicalisation.  path::ancestors /
     // Components do this correctly without touching the filesystem.
-    if path.components().any(|c| c == std::path::Component::ParentDir) {
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
         return Err(format!(
             "path traversal in workdir not permitted: {}",
             workdir
@@ -387,7 +396,7 @@ pub fn validate_workdir(workdir: &str, base_dir: Option<&Path>) -> Result<PathBu
 
     let base = match base_dir {
         Some(b) => b.to_path_buf(),
-        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     let resolved = base.join(path);
     Ok(resolved)
@@ -720,9 +729,8 @@ impl ShellTool {
 
         // Determine working directory with path-traversal validation.
         let cwd = match workdir {
-            Some(wd) => validate_workdir(wd, self.working_dir.as_deref()).map_err(|e| {
-                ToolError::NotAuthorized(format!("Invalid workdir: {}", e))
-            })?,
+            Some(wd) => validate_workdir(wd, self.working_dir.as_deref())
+                .map_err(|e| ToolError::NotAuthorized(format!("Invalid workdir: {}", e)))?,
             None => self
                 .working_dir
                 .clone()

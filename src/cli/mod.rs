@@ -7,15 +7,19 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
+//! - Managing scheduled routines (`cron list`, `cron add`, `cron edit`, etc.)
+//! - Sending messages to the running gateway (`message send`)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
 mod completion;
 mod config;
+pub mod cron;
 mod doctor;
 mod mcp;
 pub mod memory;
+pub mod message;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -25,12 +29,14 @@ mod tool;
 
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
+pub use cron::{CronCommand, run_cron_command_with_db};
 pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
 pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
+pub use message::{MessageCommand, run_message_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use service::{ServiceCommand, run_service_command};
@@ -109,6 +115,14 @@ pub enum Command {
     /// DM pairing (approve inbound requests from unknown senders)
     #[command(subcommand)]
     Pairing(PairingCommand),
+
+    /// Manage scheduled routines (cron jobs, event triggers, webhooks)
+    #[command(subcommand)]
+    Cron(CronCommand),
+
+    /// Send messages to the running IronClaw gateway
+    #[command(subcommand)]
+    Message(MessageCommand),
 
     /// Manage OS service (launchd / systemd)
     #[command(subcommand)]
