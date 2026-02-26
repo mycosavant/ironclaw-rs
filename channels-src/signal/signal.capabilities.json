@@ -6,7 +6,7 @@
     "required_secrets": [
       {
         "name": "signal_api_url",
-        "prompt": "Enter the base URL of your signal-cli REST API (e.g. http://localhost:8080)",
+        "prompt": "Enter the base URL of your signal-cli REST API (e.g. http://localhost:8080). SECURITY: After install, restrict the HTTP allowlist in capabilities to match this host exactly.",
         "optional": false
       },
       {
@@ -18,7 +18,12 @@
   },
   "capabilities": {
     "http": {
-      "allowlist": [{ "host": "*", "path_prefix": "/" }],
+      "allowlist": [
+        { "host": "localhost", "path_prefix": "/" },
+        { "host": "127.0.0.1", "path_prefix": "/" },
+        { "host": "::1", "path_prefix": "/" }
+      ],
+      "_note": "signal-cli is self-hosted. If your instance runs on a non-loopback host, add it here. Never use '*' in production.",
       "rate_limit": {
         "requests_per_minute": 60,
         "requests_per_hour": 2000

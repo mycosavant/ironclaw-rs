@@ -132,6 +132,10 @@ struct SlackDraftState {
     ts: String,
     /// Thread `ts` if the conversation is inside a thread.
     thread_ts: Option<String>,
+    /// Unix timestamp (ms) when the draft was posted.
+    /// Used to expire stale drafts that were never consumed (e.g., if the
+    /// agent turn crashed after posting the placeholder).
+    posted_at_ms: u64,
 }
 
 /// Workspace key for the pending draft message for a given channel + thread context.
@@ -335,9 +339,14 @@ impl Guest for SlackChannel {
         let thread_ts = metadata.thread_ts.clone();
         let key = draft_key(&metadata.channel, thread_ts.as_deref());
 
-        // Only post a draft if there isn't already one pending.
+        // Only post a draft if there isn't already one pending (that isn't stale).
+        // A draft older than 2 hours is considered stale: the agent turn it belonged to
+        // finished but the draft was never consumed (crash, restart, etc.).
+        const DRAFT_TTL_MS: u64 = 2 * 60 * 60 * 1_000; // 2 hours
+        let now_ms = channel_host::now_millis();
         let already_pending = channel_host::workspace_read(&key)
-            .map(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str::<SlackDraftState>(&s).ok())
+            .map(|d| now_ms.saturating_sub(d.posted_at_ms) < DRAFT_TTL_MS)
             .unwrap_or(false);
 
         if already_pending {
@@ -350,16 +359,35 @@ impl Guest for SlackChannel {
                 let state = SlackDraftState {
                     ts,
                     thread_ts: thread_ts.clone(),
+                    posted_at_ms: channel_host::now_millis(),
                 };
                 if let Ok(state_json) = serde_json::to_string(&state) {
-                    let _ = channel_host::workspace_write(&key, &state_json);
-                    channel_host::log(
-                        channel_host::LogLevel::Debug,
-                        &format!(
-                            "Posted thinking placeholder in channel {}",
-                            metadata.channel
-                        ),
-                    );
+                    match channel_host::workspace_write(&key, &state_json) {
+                        Ok(()) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Debug,
+                                &format!(
+                                    "Posted thinking placeholder in channel {}",
+                                    metadata.channel
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            // workspace_write failed: the placeholder was already posted to
+                            // Slack but we can't track it for later update. Attempt to delete
+                            // the orphaned placeholder so the channel isn't left in a bad state.
+                            channel_host::log(
+                                channel_host::LogLevel::Warn,
+                                &format!(
+                                    "Failed to persist draft state for channel {} (ts={}): {}. \
+                                     Attempting to delete orphaned placeholder.",
+                                    metadata.channel, &state.ts, e
+                                ),
+                            );
+                            // Best-effort delete; errors are suppressed.
+                            let _ = slack_delete_message(&metadata.channel, &state.ts);
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -477,11 +505,76 @@ fn slack_update_message(channel: &str, ts: &str, text: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Delete a message via chat.delete.
+///
+/// Used to clean up orphaned placeholder messages when draft state persistence
+/// fails after a successful `chat.postMessage`.
+fn slack_delete_message(channel: &str, ts: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "channel": channel,
+        "ts": ts,
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let http_response = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/chat.delete",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if http_response.status != 200 {
+        return Err(format!(
+            "Slack API returned status {}",
+            http_response.status
+        ));
+    }
+
+    let resp: SlackUpdateResponse = serde_json::from_slice(&http_response.body)
+        .map_err(|e| format!("Failed to parse chat.delete response: {}", e))?;
+
+    if !resp.ok {
+        return Err(format!(
+            "chat.delete error: {}",
+            resp.error.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    Ok(())
+}
+
 /// Handle a Slack event and emit message if applicable.
-fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
+fn handle_slack_event(event: SlackEvent, team_id: Option<String>, event_id: Option<String>) {
+    // Deduplicate events: Slack retries failed deliveries with the same event_id.
+    // Persisting seen IDs prevents duplicate agent responses for the same event.
+    if let Some(ref eid) = event_id {
+        let seen_key = format!("state/seen_events/{}", eid);
+        if channel_host::workspace_read(&seen_key).is_some() {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Slack: duplicate event_id {} — skipping", eid),
+            );
+            return;
+        }
+        // Mark event as seen. The host namespaces this under channels/slack/
+        // so it can't escape the channel prefix.
+        let _ = channel_host::workspace_write(&seen_key, "1");
+    }
+
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
+            // Skip messages from bots or with a subtype (edited, bot_message, etc.)
+            // This prevents bot loops if another bot @-mentions this bot.
+            if event.bot_id.is_some() || event.subtype.is_some() {
+                return;
+            }
             if let (Some(user), Some(channel), Some(text), Some(ts)) = (
                 event.user,
                 event.channel.clone(),
@@ -509,8 +602,10 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.text,
                 event.ts.clone(),
             ) {
-                // Only process DMs (channel IDs starting with D)
-                if channel.starts_with('D') {
+                // Only process DMs (D-prefix) and group DMs (G-prefix multiparty DMs).
+                // Other channel types (C-prefix public/private channels) are handled
+                // via app_mention; ignoring them here avoids duplicate processing.
+                if channel.starts_with('D') || channel.starts_with('G') {
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
@@ -610,7 +705,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.iter().any(|s| s == "*" || s == user_id);
 
     if is_allowed {
         return true;

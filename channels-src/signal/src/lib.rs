@@ -138,6 +138,51 @@ const API_URL_PATH: &str = "state/api_url";
 const CHANNEL_NAME: &str = "signal";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Validate that `number` is a plausible E.164 phone number.
+///
+/// E.164 format: `+` followed by 7–15 digits (ITU-T).
+/// This prevents path-traversal via crafted numbers like `+1234/../../etc`.
+///
+/// Returns `Ok(())` if the number looks valid, or an `Err` with a description.
+fn validate_e164(number: &str) -> Result<(), String> {
+    if !number.starts_with('+') {
+        return Err(format!(
+            "phone number must start with '+': {}",
+            number
+        ));
+    }
+    let digits: &str = &number[1..];
+    if digits.len() < 7 || digits.len() > 15 {
+        return Err(format!(
+            "phone number must have 7\u{2013}15 digits after '+': {}",
+            number
+        ));
+    }
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "phone number contains non-digit characters: {}",
+            number
+        ));
+    }
+    Ok(())
+}
+
+/// Redact a phone number for log output, preserving the country code prefix
+/// and showing only the last 4 digits. E.g. `+12345678900` → `+1****8900`.
+fn redact_phone(number: &str) -> String {
+    if number.len() <= 5 {
+        return "****".to_string();
+    }
+    // Keep the '+' and first 2 chars (country code), redact middle, keep last 4
+    let visible_end = &number[number.len() - 4..];
+    let prefix = &number[..2.min(number.len())];
+    format!("{}****{}", prefix, visible_end)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WIT guest implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -157,9 +202,20 @@ impl Guest for SignalChannel {
             .filter(|s| !s.is_empty())
             .ok_or("signal_number not set in workspace config/signal_number")?;
 
+        // Validate E.164 format before embedding the number in URLs.
+        // A crafted number like `+1234/../../etc` could cause path traversal.
+        validate_e164(&signal_number)
+            .map_err(|e| format!("Invalid signal_number in config: {}", e))?;
+
         let api_url = channel_host::workspace_read("config/api_url")
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "http://localhost:8080".to_string());
+            .unwrap_or_else(|| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "Signal on_start: config/api_url not set — falling back to http://localhost:8080",
+                );
+                "http://localhost:8080".to_string()
+            });
 
         // Persist runtime state for subsequent WASM callbacks
         let _ = channel_host::workspace_write(SIGNAL_NUMBER_PATH, &signal_number);
@@ -170,23 +226,22 @@ impl Guest for SignalChannel {
         if !owner_id.is_empty() {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                &format!("Owner restriction enabled: {}", owner_id),
+                &format!("Owner restriction enabled: {}", redact_phone(owner_id)),
             );
         }
 
         let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing");
         let _ = channel_host::workspace_write(DM_POLICY_PATH, dm_policy);
 
-        let allow_from_json =
-            serde_json::to_string(&config.allow_from.unwrap_or_default())
-                .unwrap_or_else(|_| "[]".to_string());
+        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         channel_host::log(
             channel_host::LogLevel::Info,
             &format!(
                 "Signal channel ready: number={} api_url={} dm_policy={} poll={}ms",
-                signal_number, api_url, dm_policy, config.poll_interval_ms,
+                redact_phone(&signal_number), api_url, dm_policy, config.poll_interval_ms,
             ),
         );
 
@@ -225,18 +280,20 @@ impl Guest for SignalChannel {
             }
         };
         let api_url = channel_host::workspace_read(API_URL_PATH)
-            .unwrap_or_else(|| "http://localhost:8080".to_string());
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "Signal on_poll: api_url not set in workspace state — falling back to http://localhost:8080",
+                );
+                "http://localhost:8080".to_string()
+            });
 
         let receive_url = format!("{}/v1/receive/{}", api_url, signal_number);
         let headers = serde_json::json!({"Accept": "application/json"});
 
-        let response = channel_host::http_request(
-            "GET",
-            &receive_url,
-            &headers.to_string(),
-            None,
-            None,
-        );
+        let response =
+            channel_host::http_request("GET", &receive_url, &headers.to_string(), None, None);
 
         match response {
             Ok(resp) if resp.status == 200 => {
@@ -274,11 +331,24 @@ impl Guest for SignalChannel {
             .map_err(|e| format!("Failed to parse Signal metadata: {}", e))?;
 
         let api_url = channel_host::workspace_read(API_URL_PATH)
-            .unwrap_or_else(|| "http://localhost:8080".to_string());
+            .filter(|s| !s.is_empty())
+            .ok_or("api_url missing from workspace state — channel may not be initialised".to_string())
+            .unwrap_or_else(|e| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Signal on_respond: {} — falling back to localhost", e),
+                );
+                "http://localhost:8080".to_string()
+            });
         let signal_number = channel_host::workspace_read(SIGNAL_NUMBER_PATH)
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Fatal: signal_number missing from workspace state".to_string())?;
 
-        signal_send_message(&api_url, &signal_number, &meta.source, &response.content)
+        // For group messages, reply to the group rather than the individual sender.
+        // Replying to meta.source for a group message creates a private DM instead.
+        let recipient = meta.group_id.as_deref().unwrap_or(&meta.source);
+
+        signal_send_message(&api_url, &signal_number, recipient, &response.content)
     }
 
     // ─── on_status ───────────────────────────────────────────────────────────
@@ -294,10 +364,28 @@ impl Guest for SignalChannel {
             Err(_) => return,
         };
 
-        let api_url = channel_host::workspace_read(API_URL_PATH)
-            .unwrap_or_else(|| "http://localhost:8080".to_string());
-        let signal_number = channel_host::workspace_read(SIGNAL_NUMBER_PATH)
-            .unwrap_or_default();
+        let api_url = match channel_host::workspace_read(API_URL_PATH).filter(|s| !s.is_empty()) {
+            Some(url) => url,
+            None => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "Signal on_status: api_url missing from workspace state — skipping typing indicator",
+                );
+                return;
+            }
+        };
+        let signal_number = match channel_host::workspace_read(SIGNAL_NUMBER_PATH)
+            .filter(|s| !s.is_empty())
+        {
+            Some(n) => n,
+            None => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "Signal on_status: signal_number missing — skipping typing indicator",
+                );
+                return;
+            }
+        };
 
         // Best-effort typing indicator via `PUT /v1/typing/{account}`.
         // Older signal-cli versions may not support this; errors are silently
@@ -337,7 +425,7 @@ fn process_received_messages(body_str: &str, signal_number: &str) {
         return;
     }
 
-    let envelopes: Vec<ReceiveEnvelope> = match serde_json::from_str(trimmed) {
+    let mut envelopes: Vec<ReceiveEnvelope> = match serde_json::from_str(trimmed) {
         Ok(e) => e,
         Err(e) => {
             channel_host::log(
@@ -348,10 +436,24 @@ fn process_received_messages(body_str: &str, signal_number: &str) {
         }
     };
 
+    // Cap batch size to prevent unbounded processing from a large backlog
+    // (DoS protection: a misbehaving or backlogged signal-cli could return
+    // thousands of queued messages in one response).
+    if envelopes.len() > 100 {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Signal: received {} envelopes, processing only the first 100",
+                envelopes.len()
+            ),
+        );
+        envelopes.truncate(100);
+    }
+
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH)
         .and_then(|s| if s.is_empty() { None } else { Some(s) });
-    let dm_policy = channel_host::workspace_read(DM_POLICY_PATH)
-        .unwrap_or_else(|| "pairing".to_string());
+    let dm_policy =
+        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
     let allow_from: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -397,7 +499,10 @@ fn process_received_messages(body_str: &str, signal_number: &str) {
             if &sender != owner {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
-                    &format!("Signal: message from non-owner {} rejected (owner lock)", sender),
+                    &format!(
+                        "Signal: message from non-owner {} rejected (owner lock)",
+                        redact_phone(&sender)
+                    ),
                 );
                 continue;
             }
@@ -438,15 +543,9 @@ fn process_received_messages(body_str: &str, signal_number: &str) {
         let thread_id = Some(format!("{}/{}", CHANNEL_NAME, conversation_id));
 
         let display_name = match &envelope.source_name {
-            Some(n) if !n.is_empty() => format!("{} ({})", n, sender),
-            _ => sender.clone(),
+            Some(n) if !n.is_empty() => format!("{} ({})", n, redact_phone(&sender)),
+            _ => redact_phone(&sender),
         };
-
-        let msg_id = format!(
-            "signal-{}-{}",
-            sender.chars().filter(|c| c.is_ascii_digit()).collect::<String>(),
-            timestamp,
-        );
 
         channel_host::emit_message(&EmittedMessage {
             user_id: sender.clone(),
@@ -458,7 +557,7 @@ fn process_received_messages(body_str: &str, signal_number: &str) {
 
         channel_host::log(
             channel_host::LogLevel::Debug,
-            &format!("Signal: emitted message {} from {}", msg_id, display_name),
+            &format!("Signal: emitted message from {}", display_name),
         );
     }
 }
@@ -469,25 +568,22 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
     match dm_policy {
         "open" => true,
         "allowlist" => {
-            let ok = allow_from.contains(&"*".to_string())
-                || allow_from.contains(&sender.to_string());
+            let ok = allow_from.iter().any(|s| s == "*" || s == sender);
             if !ok {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Signal: DM from {} blocked (not in allowlist)", sender),
+                    &format!("Signal: DM from {} blocked (not in allowlist)", redact_phone(sender)),
                 );
             }
             ok
         }
         _ => {
             // "pairing" and anything unrecognised: check the pairing store
-            let store_allowed = channel_host::pairing_read_allow_from(CHANNEL_NAME)
-                .unwrap_or_default();
+            let store_allowed =
+                channel_host::pairing_read_allow_from(CHANNEL_NAME).unwrap_or_default();
 
-            let is_allowed = allow_from.contains(&"*".to_string())
-                || allow_from.contains(&sender.to_string())
-                || store_allowed.contains(&"*".to_string())
-                || store_allowed.contains(&sender.to_string());
+            let is_allowed = allow_from.iter().any(|s| s == "*" || s == sender)
+                || store_allowed.iter().any(|s| s == "*" || s == sender);
 
             if is_allowed {
                 return true;
@@ -501,7 +597,7 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
                         channel_host::LogLevel::Info,
                         &format!(
                             "Signal: pairing request created for {} (code={})",
-                            sender, result.code,
+                            redact_phone(sender), result.code,
                         ),
                     );
                     if result.created {
@@ -517,7 +613,7 @@ fn check_sender_allowed(sender: &str, dm_policy: &str, allow_from: &[String]) ->
                 Err(e) => {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
-                        &format!("Signal: pairing upsert failed for {}: {}", sender, e),
+                        &format!("Signal: pairing upsert failed for {}: {}", redact_phone(sender), e),
                     );
                 }
             }
@@ -556,7 +652,7 @@ fn signal_send_message(
     if response.status == 200 || response.status == 201 {
         channel_host::log(
             channel_host::LogLevel::Debug,
-            &format!("Signal: message sent to {}", recipient),
+            &format!("Signal: message sent to {}", redact_phone(recipient)),
         );
         Ok(())
     } else {

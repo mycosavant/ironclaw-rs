@@ -2810,6 +2810,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
+ "libc",
  "libsql",
  "mime_guess",
  "open",
