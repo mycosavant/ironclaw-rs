@@ -500,10 +500,8 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
     }
 
     // Thread context: component messages carry channel info on the outer interaction
-    let (channel_id, thread_id) = resolve_channel_and_thread(
-        Some(&message.channel_id),
-        interaction.channel.as_ref(),
-    );
+    let (channel_id, thread_id) =
+        resolve_channel_and_thread(Some(&message.channel_id), interaction.channel.as_ref());
 
     let metadata = DiscordMessageMetadata {
         channel_id: channel_id.clone(),
@@ -643,10 +641,7 @@ fn check_sender_permission(
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     if let Some(ctx) = reply_ctx {
@@ -818,8 +813,7 @@ mod tests {
             channel_type: 11,
             parent_id: Some("parent_channel".into()),
         };
-        let (channel_id, thread_id) =
-            resolve_channel_and_thread(Some("thread_id"), Some(&ch));
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("thread_id"), Some(&ch));
         // channel_id should be the parent, thread_id should be the thread itself
         assert_eq!(channel_id, "parent_channel");
         assert_eq!(thread_id.as_deref(), Some("thread_id"));
@@ -846,8 +840,7 @@ mod tests {
             channel_type: 10,
             parent_id: Some("announce_ch".into()),
         };
-        let (channel_id, thread_id) =
-            resolve_channel_and_thread(Some("news_thread"), Some(&ch));
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("news_thread"), Some(&ch));
         assert_eq!(channel_id, "announce_ch");
         assert_eq!(thread_id.as_deref(), Some("news_thread"));
     }
@@ -860,8 +853,7 @@ mod tests {
             channel_type: 11,
             parent_id: None,
         };
-        let (channel_id, thread_id) =
-            resolve_channel_and_thread(Some("fallback_ch"), Some(&ch));
+        let (channel_id, thread_id) = resolve_channel_and_thread(Some("fallback_ch"), Some(&ch));
         assert_eq!(channel_id, "fallback_ch");
         assert_eq!(thread_id.as_deref(), Some("thread_id"));
     }
@@ -876,10 +868,45 @@ mod tests {
 
     #[test]
     fn test_is_thread() {
-        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 10, parent_id: None }.is_thread());
-        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 11, parent_id: None }.is_thread());
-        assert!(DiscordChannelInfo { id: "x".into(), channel_type: 12, parent_id: None }.is_thread());
-        assert!(!DiscordChannelInfo { id: "x".into(), channel_type: 0, parent_id: None }.is_thread());
-        assert!(!DiscordChannelInfo { id: "x".into(), channel_type: 5, parent_id: None }.is_thread());
+        assert!(
+            DiscordChannelInfo {
+                id: "x".into(),
+                channel_type: 10,
+                parent_id: None
+            }
+            .is_thread()
+        );
+        assert!(
+            DiscordChannelInfo {
+                id: "x".into(),
+                channel_type: 11,
+                parent_id: None
+            }
+            .is_thread()
+        );
+        assert!(
+            DiscordChannelInfo {
+                id: "x".into(),
+                channel_type: 12,
+                parent_id: None
+            }
+            .is_thread()
+        );
+        assert!(
+            !DiscordChannelInfo {
+                id: "x".into(),
+                channel_type: 0,
+                parent_id: None
+            }
+            .is_thread()
+        );
+        assert!(
+            !DiscordChannelInfo {
+                id: "x".into(),
+                channel_type: 5,
+                parent_id: None
+            }
+            .is_thread()
+        );
     }
 }

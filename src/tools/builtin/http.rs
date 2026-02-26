@@ -587,10 +587,14 @@ mod tests {
         ))));
         // Carrier-grade NAT (100.64.0.0/10)
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 127, 255, 255))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
+            100, 127, 255, 255
+        ))));
         // Benchmark range (198.18.0.0/15)
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(198, 19, 255, 0))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
+            198, 19, 255, 0
+        ))));
         // Public — must NOT be blocked
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));

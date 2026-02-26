@@ -60,29 +60,29 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 3. Messaging Channels
 
-| Channel       | OpenClaw | IronClaw | Priority | Notes                                                            |
-| ------------- | -------- | -------- | -------- | ---------------------------------------------------------------- |
-| CLI/TUI       | ✅       | ✅       | -        | Ratatui-based TUI                                                |
-| HTTP webhook  | ✅       | ✅       | -        | axum with secret validation                                      |
-| REPL (simple) | ✅       | ✅       | -        | For testing                                                      |
-| WASM channels | ❌       | ✅       | -        | IronClaw innovation                                              |
-| WhatsApp      | ✅       | ❌       | P3       | Baileys (Web), same-phone mode with echo detection               |
-| Telegram      | ✅       | ✅       | -        | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
+| Channel       | OpenClaw | IronClaw | Priority | Notes                                                             |
+| ------------- | -------- | -------- | -------- | ----------------------------------------------------------------- |
+| CLI/TUI       | ✅       | ✅       | -        | Ratatui-based TUI                                                 |
+| HTTP webhook  | ✅       | ✅       | -        | axum with secret validation                                       |
+| REPL (simple) | ✅       | ✅       | -        | For testing                                                       |
+| WASM channels | ❌       | ✅       | -        | IronClaw innovation                                               |
+| WhatsApp      | ✅       | ❌       | P3       | Baileys (Web), same-phone mode with echo detection                |
+| Telegram      | ✅       | ✅       | -        | WASM channel(MTProto), DM pairing, caption, /start, bot_username  |
 | Discord       | ✅       | ✅       | -        | WASM channel; slash cmds, buttons, thread parent binding, pairing |
-| Signal        | ✅       | ✅       | -        | signal-cli REST API, WASM channel, polling mode                  |
-| Slack         | ✅       | ✅       | -        | WASM channel, streaming draft replies (on_status Thinking)       |
-| iMessage      | ✅       | ❌       | P3       | BlueBubbles or Linq recommended                                  |
-| Linq          | ✅       | ❌       | P3       | Real iMessage via API, no Mac required                           |
-| Feishu/Lark   | ✅       | ❌       | P3       | Bitable create app/field tools                                   |
-| LINE          | ✅       | ❌       | P3       |                                                                  |
-| WebChat       | ✅       | ✅       | -        | Web gateway chat                                                 |
-| Matrix        | ✅       | ❌       | P3       | E2EE support                                                     |
-| Mattermost    | ✅       | ❌       | P3       | Emoji reactions                                                  |
-| Google Chat   | ✅       | ❌       | P3       |                                                                  |
-| MS Teams      | ✅       | ❌       | P3       |                                                                  |
-| Twitch        | ✅       | ❌       | P3       |                                                                  |
-| Voice Call    | ✅       | ❌       | P3       | Twilio/Telnyx, stale call reaper, pre-cached greeting            |
-| Nostr         | ✅       | ❌       | P3       |                                                                  |
+| Signal        | ✅       | ✅       | -        | signal-cli REST API, WASM channel, polling mode                   |
+| Slack         | ✅       | ✅       | -        | WASM channel, streaming draft replies (on_status Thinking)        |
+| iMessage      | ✅       | ❌       | P3       | BlueBubbles or Linq recommended                                   |
+| Linq          | ✅       | ❌       | P3       | Real iMessage via API, no Mac required                            |
+| Feishu/Lark   | ✅       | ❌       | P3       | Bitable create app/field tools                                    |
+| LINE          | ✅       | ❌       | P3       |                                                                   |
+| WebChat       | ✅       | ✅       | -        | Web gateway chat                                                  |
+| Matrix        | ✅       | ❌       | P3       | E2EE support                                                      |
+| Mattermost    | ✅       | ❌       | P3       | Emoji reactions                                                   |
+| Google Chat   | ✅       | ❌       | P3       |                                                                   |
+| MS Teams      | ✅       | ❌       | P3       |                                                                   |
+| Twitch        | ✅       | ❌       | P3       |                                                                   |
+| Voice Call    | ✅       | ❌       | P3       | Twilio/Telnyx, stale call reaper, pre-cached greeting             |
+| Nostr         | ✅       | ❌       | P3       |                                                                   |
 
 ### Telegram-Specific Features (since Feb 2025)
 
@@ -96,10 +96,10 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### Discord-Specific Features (since Feb 2025)
 
-| Feature                           | OpenClaw | IronClaw | Notes                               |
-| --------------------------------- | -------- | -------- | ----------------------------------- |
-| Forwarded attachment downloads    | ✅       | ❌       | Fetch media from forwarded messages |
-| Faster reaction state machine     | ✅       | ❌       | Watchdog + debounce                 |
+| Feature                           | OpenClaw | IronClaw | Notes                                                                 |
+| --------------------------------- | -------- | -------- | --------------------------------------------------------------------- |
+| Forwarded attachment downloads    | ✅       | ❌       | Fetch media from forwarded messages                                   |
+| Faster reaction state machine     | ✅       | ❌       | Watchdog + debounce                                                   |
 | Thread parent binding inheritance | ✅       | ✅       | resolve_channel_and_thread(); REST channels/{id}/messages for threads |
 
 ### Slack-Specific Features (since Feb 2025)
@@ -435,42 +435,42 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 15. Security Features
 
-| Feature                            | OpenClaw | IronClaw | Notes                                                                                             |
-| ---------------------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------- |
-| Gateway token auth                 | ✅       | ✅       | Bearer token auth on web gateway                                                                  |
-| Per-session short-lived tokens     | ✅       | ✅       | POST /api/auth/session → opaque 64-hex token; 24h inactivity TTL; max 5 sessions; individual revoke |
-| Device pairing                     | ✅       | ❌       |                                                                                                   |
-| Tailscale identity                 | ✅       | ❌       |                                                                                                   |
-| Trusted-proxy auth                 | ✅       | ❌       | Header-based reverse proxy auth                                                                   |
-| OAuth flows                        | ✅       | 🚧       | NEAR AI OAuth                                                                                     |
-| DM pairing verification            | ✅       | ✅       | ironclaw pairing approve, host APIs                                                               |
-| Allowlist/blocklist                | ✅       | 🚧       | allow_from + pairing store                                                                        |
-| Per-group tool policies            | ✅       | ❌       |                                                                                                   |
-| Exec approvals                     | ✅       | ✅       | TUI overlay                                                                                       |
-| TLS 1.3 minimum                    | ✅       | ✅       | reqwest rustls                                                                                    |
-| SSRF protection                    | ✅       | ✅       | WASM allowlist                                                                                    |
-| SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                      |
-| Cron webhook SSRF guard            | ✅       | ✅       | dispatch_client_for_target in hooks/bundled.rs (DNS resolve + IP blocklist)                       |
-| Loopback-first                     | ✅       | 🚧       | HTTP binds 0.0.0.0                                                                                |
-| Docker sandbox                     | ✅       | ✅       | Orchestrator/worker containers                                                                    |
-| Podman support                     | ✅       | ❌       | Alternative to Docker                                                                             |
-| WASM sandbox                       | ❌       | ✅       | IronClaw innovation                                                                               |
-| WASM binary verification           | ❌       | ✅       | Ed25519 signature + SHA-256 hash at install time; trust store at `~/.ironclaw/trusted_keys/*.hex` |
-| Sandbox env sanitization           | ✅       | 🚧       | Shell tool scrubs env vars (secret detection); docker container env sanitization partial          |
-| Tool policies                      | ✅       | ✅       |                                                                                                   |
-| Elevated mode                      | ✅       | ❌       |                                                                                                   |
-| Safe bins allowlist                | ✅       | ❌       | Hardened path trust                                                                               |
-| LD*/DYLD* validation               | ✅       | ❌       |                                                                                                   |
-| Path traversal prevention          | ✅       | ✅       | Including config includes (OC-06)                                                                 |
-| Credential theft via env injection | ✅       | 🚧       | Shell env scrubbing + command injection detection; no full OC-09 defense                          |
-| Session file permissions (0o600)   | ✅       | ✅       | Session token file set to 0o600 in llm/session.rs                                                 |
-| Database encryption at rest        | ✅       | ✅       | libSQL: AES-256-CBC (SQLCipher) via `LIBSQL_ENCRYPTION_KEY`; HKDF-SHA256 key derivation           |
-| Skill download path restriction    | ✅       | ❌       | Prevent arbitrary write targets                                                                   |
-| Webhook signature verification     | ✅       | ✅       |                                                                                                   |
-| Media URL validation               | ✅       | ❌       |                                                                                                   |
+| Feature                            | OpenClaw | IronClaw | Notes                                                                                                 |
+| ---------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| Gateway token auth                 | ✅       | ✅       | Bearer token auth on web gateway                                                                      |
+| Per-session short-lived tokens     | ✅       | ✅       | POST /api/auth/session → opaque 64-hex token; 24h inactivity TTL; max 5 sessions; individual revoke   |
+| Device pairing                     | ✅       | ❌       |                                                                                                       |
+| Tailscale identity                 | ✅       | ❌       |                                                                                                       |
+| Trusted-proxy auth                 | ✅       | ❌       | Header-based reverse proxy auth                                                                       |
+| OAuth flows                        | ✅       | 🚧       | NEAR AI OAuth                                                                                         |
+| DM pairing verification            | ✅       | ✅       | ironclaw pairing approve, host APIs                                                                   |
+| Allowlist/blocklist                | ✅       | 🚧       | allow_from + pairing store                                                                            |
+| Per-group tool policies            | ✅       | ❌       |                                                                                                       |
+| Exec approvals                     | ✅       | ✅       | TUI overlay                                                                                           |
+| TLS 1.3 minimum                    | ✅       | ✅       | reqwest rustls                                                                                        |
+| SSRF protection                    | ✅       | ✅       | WASM allowlist                                                                                        |
+| SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                          |
+| Cron webhook SSRF guard            | ✅       | ✅       | dispatch_client_for_target in hooks/bundled.rs (DNS resolve + IP blocklist)                           |
+| Loopback-first                     | ✅       | 🚧       | HTTP binds 0.0.0.0                                                                                    |
+| Docker sandbox                     | ✅       | ✅       | Orchestrator/worker containers                                                                        |
+| Podman support                     | ✅       | ❌       | Alternative to Docker                                                                                 |
+| WASM sandbox                       | ❌       | ✅       | IronClaw innovation                                                                                   |
+| WASM binary verification           | ❌       | ✅       | Ed25519 signature + SHA-256 hash at install time; trust store at `~/.ironclaw/trusted_keys/*.hex`     |
+| Sandbox env sanitization           | ✅       | 🚧       | Shell tool scrubs env vars (secret detection); docker container env sanitization partial              |
+| Tool policies                      | ✅       | ✅       |                                                                                                       |
+| Elevated mode                      | ✅       | ❌       |                                                                                                       |
+| Safe bins allowlist                | ✅       | ❌       | Hardened path trust                                                                                   |
+| LD*/DYLD* validation               | ✅       | ❌       |                                                                                                       |
+| Path traversal prevention          | ✅       | ✅       | Including config includes (OC-06)                                                                     |
+| Credential theft via env injection | ✅       | 🚧       | Shell env scrubbing + command injection detection; no full OC-09 defense                              |
+| Session file permissions (0o600)   | ✅       | ✅       | Session token file set to 0o600 in llm/session.rs                                                     |
+| Database encryption at rest        | ✅       | ✅       | libSQL: AES-256-CBC (SQLCipher) via `LIBSQL_ENCRYPTION_KEY`; HKDF-SHA256 key derivation               |
+| Skill download path restriction    | ✅       | ❌       | Prevent arbitrary write targets                                                                       |
+| Webhook signature verification     | ✅       | ✅       |                                                                                                       |
+| Media URL validation               | ✅       | ❌       |                                                                                                       |
 | Prompt injection defense           | ✅       | ✅       | Pattern detection, sanitization, injection circuit breaker (trips job at ≥5 high-severity detections) |
-| Leak detection                     | ✅       | ✅       | Secret exfiltration                                                                               |
-| Dangerous tool re-enable warning   | ✅       | ❌       | Warn when gateway.tools.allow re-enables HTTP tools                                               |
+| Leak detection                     | ✅       | ✅       | Secret exfiltration                                                                                   |
+| Dangerous tool re-enable warning   | ✅       | ❌       | Warn when gateway.tools.allow re-enables HTTP tools                                                   |
 
 ### Owner: _Unassigned_
 

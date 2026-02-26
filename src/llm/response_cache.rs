@@ -99,7 +99,12 @@ impl CachedProvider {
 
     /// Total cache hits across all entries.
     pub async fn total_hits(&self) -> u64 {
-        self.cache.lock().await.iter().map(|(_, e)| e.hit_count).sum()
+        self.cache
+            .lock()
+            .await
+            .iter()
+            .map(|(_, e)| e.hit_count)
+            .sum()
     }
 
     /// Clear all cached entries.
