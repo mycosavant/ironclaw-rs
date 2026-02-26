@@ -19,7 +19,10 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    ChannelHealthMonitor, ChannelManager, HealthMonitorConfig, IncomingMessage, OutgoingResponse,
+    StatusUpdate,
+};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -226,6 +229,14 @@ impl Agent {
     pub async fn run(self) -> Result<(), Error> {
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
+
+        // Spawn channel health watchdog — periodically calls health_check on every
+        // registered channel and injects system notifications on state transitions.
+        let _health_monitor = ChannelHealthMonitor::new(
+            Arc::clone(&self.channels),
+            HealthMonitorConfig::default(),
+        )
+        .spawn();
 
         // Start self-repair task with notification forwarding
         let repair = Arc::new(DefaultSelfRepair::new(
