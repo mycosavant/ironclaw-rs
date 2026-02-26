@@ -12,11 +12,15 @@
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
+//! - Controlling the web gateway (`gateway status/logs/stop/start`)
+//! - Managing WASM channel modules (`channels list/install/remove/status`)
 
+mod channels;
 mod completion;
 mod config;
 pub mod cron;
 mod doctor;
+pub mod gateway;
 mod mcp;
 pub mod memory;
 pub mod message;
@@ -27,10 +31,12 @@ mod service;
 pub mod status;
 mod tool;
 
+pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command_with_db};
 pub use doctor::run_doctor_command;
+pub use gateway::{GatewayCommand, run_gateway_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
@@ -127,6 +133,14 @@ pub enum Command {
     /// Manage OS service (launchd / systemd)
     #[command(subcommand)]
     Service(ServiceCommand),
+
+    /// Control the web gateway (status, logs, stop, start)
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
+
+    /// Manage WASM channel modules (list, install, remove, status)
+    #[command(subcommand)]
+    Channels(ChannelsCommand),
 
     /// Probe external dependencies and validate configuration
     Doctor,

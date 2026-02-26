@@ -328,6 +328,7 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/api/gateway/shutdown", post(gateway_shutdown_handler))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -2709,11 +2710,16 @@ async fn public_webhook_handler(
                 false
             }
         })
-        .ok_or((StatusCode::NOT_FOUND, "No webhook routine found for this path".to_string()))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "No webhook routine found for this path".to_string(),
+        ))?;
 
     // Verify shared secret when configured.
-    if let crate::agent::routine::Trigger::Webhook { secret: Some(expected_secret), .. } =
-        &routine.trigger
+    if let crate::agent::routine::Trigger::Webhook {
+        secret: Some(expected_secret),
+        ..
+    } = &routine.trigger
     {
         let verified = verify_webhook_secret(expected_secret, &headers, &body);
         if !verified {
@@ -2722,18 +2728,26 @@ async fn public_webhook_handler(
                 routine_name = %routine.name,
                 "Webhook secret verification failed"
             );
-            return Err((StatusCode::UNAUTHORIZED, "Invalid webhook secret".to_string()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Invalid webhook secret".to_string(),
+            ));
         }
     }
 
     if !routine.enabled {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "Routine is disabled".to_string()));
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Routine is disabled".to_string(),
+        ));
     }
 
     // Fire the routine via the message pipeline.
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob { title, description, .. } => {
+        crate::agent::routine::RoutineAction::FullJob {
+            title, description, ..
+        } => {
             format!("{}: {}", title, description)
         }
     };
@@ -2742,7 +2756,12 @@ async fn public_webhook_handler(
     let content = if body_text.trim().is_empty() {
         format!("[routine:{}] {}", routine.name, prompt)
     } else {
-        format!("[routine:{}] {} | webhook_body: {}", routine.name, prompt, body_text.trim())
+        format!(
+            "[routine:{}] {} | webhook_body: {}",
+            routine.name,
+            prompt,
+            body_text.trim()
+        )
     };
 
     let msg = IncomingMessage::new("gateway", &state.user_id, content);
@@ -2753,10 +2772,12 @@ async fn public_webhook_handler(
         "Channel not started".to_string(),
     ))?;
 
-    tx.send(msg).await.map_err(|_| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Channel closed".to_string(),
-    ))?;
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
 
     tracing::info!(
         routine_id = %routine.id,
@@ -2781,22 +2802,24 @@ fn verify_webhook_secret(expected_secret: &str, headers: &HeaderMap, body: &Byte
 
     // 1. Plain secret header.
     if let Some(val) = headers.get("x-webhook-secret")
-        && let Ok(provided) = val.to_str() {
-            return provided.as_bytes().ct_eq(expected_secret.as_bytes()).into();
-        }
+        && let Ok(provided) = val.to_str()
+    {
+        return provided.as_bytes().ct_eq(expected_secret.as_bytes()).into();
+    }
 
     // 2. GitHub-style HMAC-SHA256 signature.
     if let Some(sig_header) = headers.get("x-hub-signature-256")
-        && let Ok(sig_str) = sig_header.to_str() {
-            let hex_part = sig_str.strip_prefix("sha256=").unwrap_or(sig_str);
-            if let Ok(provided_bytes) = hex::decode(hex_part) {
-                let mut mac = Hmac::<Sha256>::new_from_slice(expected_secret.as_bytes())
-                    .expect("HMAC accepts any key length");
-                mac.update(body);
-                let computed = mac.finalize().into_bytes();
-                return computed.as_slice().ct_eq(&provided_bytes).into();
-            }
+        && let Ok(sig_str) = sig_header.to_str()
+    {
+        let hex_part = sig_str.strip_prefix("sha256=").unwrap_or(sig_str);
+        if let Ok(provided_bytes) = hex::decode(hex_part) {
+            let mut mac = Hmac::<Sha256>::new_from_slice(expected_secret.as_bytes())
+                .expect("HMAC accepts any key length");
+            mac.update(body);
+            let computed = mac.finalize().into_bytes();
+            return computed.as_slice().ct_eq(&provided_bytes).into();
         }
+    }
 
     false
 }
@@ -3139,6 +3162,28 @@ struct GatewayStatusResponse {
     actions_this_hour: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_usage: Option<Vec<ModelUsageEntry>>,
+}
+
+async fn gateway_shutdown_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
+    let mut guard = state.shutdown_tx.write().await;
+    if let Some(tx) = guard.take() {
+        let _ = tx.send(());
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": "shutdown initiated"
+        }))
+        .into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "shutdown already in progress or not available"
+            })),
+        )
+            .into_response()
+    }
 }
 
 #[cfg(test)]

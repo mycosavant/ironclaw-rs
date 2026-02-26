@@ -45,7 +45,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery              | ✅       | ❌       |                                                                                     |
 | Tailscale integration               | ✅       | ❌       |                                                                                     |
 | Health check endpoints              | ✅       | ✅       | /api/health + /api/gateway/status                                                   |
-| `doctor` diagnostics                | ✅       | ❌       |                                                                                     |
+| `doctor` diagnostics                | ✅       | ✅       |                                                                      |
 | Agent event broadcast               | ✅       | 🚧       | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor              | ✅       | ❌       | Auto-restart with configurable interval                                             |
 | Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                      |
@@ -136,11 +136,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | -------------------------- | -------- | -------- | -------- | ---------------------------------------------------------- |
 | `run` (agent)              | ✅       | ✅       | -        | Default command                                            |
 | `tool install/list/remove` | ✅       | ✅       | -        | WASM tools                                                 |
-| `gateway start/stop`       | ✅       | ❌       | P2       |                                                            |
+| `gateway start/stop`       | ✅       | ✅       | P2       | `ironclaw gateway status/logs/stop/start`                              |
 | `onboard` (wizard)         | ✅       | ✅       | -        | Interactive setup                                          |
 | `tui`                      | ✅       | ✅       | -        | Ratatui TUI                                                |
 | `config`                   | ✅       | ✅       | -        | Read/write config                                          |
-| `channels`                 | ✅       | ❌       | P2       | Channel management                                         |
+| `channels`                 | ✅       | ✅       | P2       | Channel management (list/install/remove/status)                          |
 | `models`                   | ✅       | 🚧       | -        | Model selector in TUI                                      |
 | `status`                   | ✅       | ✅       | -        | System status (enriched session details)                   |
 | `agents`                   | ✅       | ❌       | P3       | Multi-agent management                                     |
@@ -151,12 +151,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `nodes`                    | ✅       | ❌       | P3       | Device management, remove/clear flows                      |
 | `plugins`                  | ✅       | ❌       | P3       | Plugin management                                          |
 | `hooks`                    | ✅       | ✅       | P2       | Lifecycle hooks                                            |
-| `cron`                     | ✅       | ✅       | P2       | list/show/add/edit/remove/webhook subcommands               |
+| `cron`                     | ✅       | ✅       | P2       | list/show/add/edit/remove/webhook subcommands              |
 | `webhooks`                 | ✅       | ❌       | P3       | Webhook config                                             |
 | `message send`             | ✅       | ✅       | P2       | HTTP POST to running gateway via GATEWAY_AUTH_TOKEN        |
 | `browser`                  | ✅       | ❌       | P3       | Browser automation                                         |
 | `sandbox`                  | ✅       | ✅       | -        | WASM sandbox                                               |
-| `doctor`                   | ✅       | ❌       | P2       | Diagnostics                                                |
+| `doctor`                   | ✅       | ✅       | P2       | Expanded: LLM/sandbox/gateway/extensions checks; Warn severity           |
 | `logs`                     | ✅       | ❌       | P3       | Query logs                                                 |
 | `update`                   | ✅       | ❌       | P3       | Self-update                                                |
 | `completion`               | ✅       | ❌       | P3       | Shell completion                                           |

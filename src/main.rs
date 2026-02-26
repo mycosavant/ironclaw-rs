@@ -91,6 +91,18 @@ async fn main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_service_command(service_cmd);
         }
+        Some(Command::Gateway(gw_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return ironclaw::cli::run_gateway_command(gw_cmd.clone()).await;
+        }
+        Some(Command::Channels(ch_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return ironclaw::cli::run_channels_command(ch_cmd.clone()).await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
