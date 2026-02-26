@@ -48,6 +48,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
+    "multipart",
 ] }
 
 # Serialization
@@ -197,8 +198,9 @@ image = { version = "0.25", default-features = false, features = [
     "ico",
     "tiff",
 ], optional = true }
-infer = { version = "0.16", optional = true }       # Magic-byte MIME detection
-pdf-extract = { version = "0.7", optional = true }  # PDF → plain text
+infer = { version = "0.16", optional = true } # Magic-byte MIME detection
+pdf-extract = { version = "0.7", optional = true } # PDF → plain text
+lopdf = { version = "0.34", optional = true } # PDF page count / structure
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -229,7 +231,7 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
-media = ["dep:image", "dep:infer", "dep:pdf-extract"]
+media = ["dep:image", "dep:infer", "dep:pdf-extract", "dep:lopdf"]
 
 [[test]]
 name = "html_to_markdown"

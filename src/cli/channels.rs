@@ -144,10 +144,10 @@ async fn list_channels(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()
             println!("    Caps: {}", if *has_caps { "yes" } else { "no" });
             if *has_caps {
                 let caps_path = path.with_extension("capabilities.json");
-                if let Ok(content) = fs::read_to_string(&caps_path).await {
-                    if let Ok(caps) = serde_json::from_str::<serde_json::Value>(&content) {
-                        print_caps_summary(&caps);
-                    }
+                if let Ok(content) = fs::read_to_string(&caps_path).await
+                    && let Ok(caps) = serde_json::from_str::<serde_json::Value>(&content)
+                {
+                    print_caps_summary(&caps);
                 }
             }
             println!();
@@ -520,23 +520,22 @@ async fn collect_channels(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf, bo
 
 /// Print a brief capabilities summary for the verbose listing.
 fn print_caps_summary(caps: &serde_json::Value) {
-    if let Some(http) = caps.get("http") {
-        if let Some(allowlist) = http.get("allowlist").and_then(|v| v.as_array()) {
-            let hosts: Vec<_> = allowlist
-                .iter()
-                .filter_map(|e| e.get("host").and_then(|h| h.as_str()))
-                .collect();
-            if !hosts.is_empty() {
-                println!("    HTTP: {}", hosts.join(", "));
-            }
+    if let Some(http) = caps.get("http")
+        && let Some(allowlist) = http.get("allowlist").and_then(|v| v.as_array())
+    {
+        let hosts: Vec<_> = allowlist
+            .iter()
+            .filter_map(|e| e.get("host").and_then(|h| h.as_str()))
+            .collect();
+        if !hosts.is_empty() {
+            println!("    HTTP: {}", hosts.join(", "));
         }
     }
-    if let Some(secrets) = caps.get("secrets") {
-        if let Some(names) = secrets.get("allowed_names").and_then(|v| v.as_array()) {
-            if !names.is_empty() {
-                println!("    Secrets: {}", names.len());
-            }
-        }
+    if let Some(secrets) = caps.get("secrets")
+        && let Some(names) = secrets.get("allowed_names").and_then(|v| v.as_array())
+        && !names.is_empty()
+    {
+        println!("    Secrets: {}", names.len());
     }
 }
 

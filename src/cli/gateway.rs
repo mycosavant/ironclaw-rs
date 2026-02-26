@@ -185,22 +185,22 @@ fn print_gateway_status(json: &serde_json::Value) {
     if let Some(actions) = json.get("actions_this_hour").and_then(|v| v.as_u64()) {
         println!("Actions/hour: {}", actions);
     }
-    if let Some(models) = json.get("model_usage").and_then(|v| v.as_array()) {
-        if !models.is_empty() {
-            println!("Model usage:");
-            for m in models {
-                let model = m.get("model").and_then(|v| v.as_str()).unwrap_or("?");
-                let cost = m.get("cost").and_then(|v| v.as_str()).unwrap_or("0");
-                let input = m.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let output = m.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!(
-                    "  {} — {}k in / {}k out / ${}",
-                    model,
-                    input / 1000,
-                    output / 1000,
-                    cost
-                );
-            }
+    if let Some(models) = json.get("model_usage").and_then(|v| v.as_array())
+        && !models.is_empty()
+    {
+        println!("Model usage:");
+        for m in models {
+            let model = m.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+            let cost = m.get("cost").and_then(|v| v.as_str()).unwrap_or("0");
+            let input = m.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output = m.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!(
+                "  {} — {}k in / {}k out / ${}",
+                model,
+                input / 1000,
+                output / 1000,
+                cost
+            );
         }
     }
 }
@@ -265,11 +265,11 @@ async fn logs(
 
     loop {
         // Check deadline before reading
-        if let Some(d) = deadline {
-            if tokio::time::Instant::now() >= d {
-                println!("\n(60 s timeout reached — use --follow to keep streaming)");
-                break;
-            }
+        if let Some(d) = deadline
+            && tokio::time::Instant::now() >= d
+        {
+            println!("\n(60 s timeout reached — use --follow to keep streaming)");
+            break;
         }
 
         let chunk = resp.chunk().await?;

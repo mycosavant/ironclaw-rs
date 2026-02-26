@@ -340,6 +340,7 @@ impl AppBuilder {
             Arc::new(ToolRegistry::new())
         };
         tools.register_builtin_tools();
+        tools.register_media_tools();
 
         // Create embeddings provider using the unified method
         let embeddings = self

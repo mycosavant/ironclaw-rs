@@ -6,6 +6,7 @@ mod file;
 mod http;
 mod job;
 mod json;
+pub mod media;
 mod memory;
 pub mod routine;
 pub(crate) mod shell;
@@ -23,6 +24,9 @@ pub use job::{
     PromptQueue,
 };
 pub use json::JsonTool;
+pub use media::{
+    AudioTranscribeTool, ImageConvertTool, ImageResizeTool, MediaInfoTool, PdfExtractTextTool,
+};
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,

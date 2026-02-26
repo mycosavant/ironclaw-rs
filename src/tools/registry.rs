@@ -16,9 +16,10 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
+    ApplyPatchTool, AudioTranscribeTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool,
+    ImageConvertTool, ImageResizeTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    ListDirTool, ListJobsTool, MediaInfoTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
+    MemoryWriteTool, PdfExtractTextTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
@@ -48,6 +49,11 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "memory_read",
     "memory_tree",
     "create_job",
+    "media_info",
+    "image_resize",
+    "image_convert",
+    "pdf_extract_text",
+    "audio_transcribe",
     "list_jobs",
     "job_status",
     "cancel_job",
@@ -263,6 +269,23 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ApplyPatchTool::new()));
 
         tracing::info!("Registered 5 development tools");
+    }
+
+    /// Register media pipeline tools.
+    ///
+    /// Provides MIME detection, image resize/convert, PDF text extraction, and
+    /// audio transcription. These run in the orchestrator domain and are
+    /// rate-limited to prevent runaway external API calls.
+    ///
+    /// Call this after `register_builtin_tools()` to enable media processing.
+    pub fn register_media_tools(&self) {
+        self.register_sync(Arc::new(MediaInfoTool));
+        self.register_sync(Arc::new(ImageResizeTool));
+        self.register_sync(Arc::new(ImageConvertTool));
+        self.register_sync(Arc::new(PdfExtractTextTool));
+        self.register_sync(Arc::new(AudioTranscribeTool));
+
+        tracing::info!("Registered 5 media pipeline tools");
     }
 
     /// Register memory tools with a workspace.
