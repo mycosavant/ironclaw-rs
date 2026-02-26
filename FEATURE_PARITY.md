@@ -66,10 +66,10 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP webhook  | ✅       | ✅       | -        | axum with secret validation                                      |
 | REPL (simple) | ✅       | ✅       | -        | For testing                                                      |
 | WASM channels | ❌       | ✅       | -        | IronClaw innovation                                              |
-| WhatsApp      | ✅       | ❌       | P1       | Baileys (Web), same-phone mode with echo detection               |
+| WhatsApp      | ✅       | ❌       | P3       | Baileys (Web), same-phone mode with echo detection               |
 | Telegram      | ✅       | ✅       | -        | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord       | ✅       | ❌       | P2       | discord.js, thread parent binding inheritance                    |
-| Signal        | ✅       | ❌       | P2       | signal-cli                                                       |
+| Signal        | ✅       | ❌       | P1       | signal-cli                                                       |
 | Slack         | ✅       | ✅       | -        | WASM tool                                                        |
 | iMessage      | ✅       | ❌       | P3       | BlueBubbles or Linq recommended                                  |
 | Linq          | ✅       | ❌       | P3       | Real iMessage via API, no Mac required                           |
@@ -530,7 +530,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
-- ❌ WhatsApp channel
+- ❌ Signal channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
@@ -546,7 +546,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ### P3 - Lower Priority
 
 - ❌ Discord channel
-- ❌ Signal channel
+- ❌ WhatsApp channel
 - ❌ Matrix channel
 - ❌ Other messaging platforms
 - ❌ TTS/audio features
