@@ -251,13 +251,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | ------------------------------ | -------- | -------- | -------- | --------------------------------------- |
 | Image processing (Sharp)       | ✅       | ❌       | P2       | Resize, format convert                  |
 | Configurable image resize dims | ✅       | ❌       | P2       | Per-agent dimension config              |
-| Multiple images per tool call  | ✅       | ❌       | P2       | Single tool invocation, multiple images |
-| Audio transcription            | ✅       | ❌       | P2       |                                         |
+| Multiple images per tool call  | ✅       | ✅       | P2       | `image_analyze` accepts up to 10 images per call (base64 data-URI) |
+| Audio transcription            | ✅       | ✅       | P2       | `audio_transcribe` via OpenAI Whisper API (multipart upload, 25 MiB max) |
 | Video support                  | ✅       | ❌       | P3       |                                         |
-| PDF parsing                    | ✅       | ❌       | P2       | pdfjs-dist                              |
-| MIME detection                 | ✅       | ❌       | P2       |                                         |
+| PDF parsing                    | ✅       | ✅       | P2       | `pdf_extract_text` via lopdf + pdf-extract, 128 KiB output cap |
+| MIME detection                 | ✅       | ✅       | P2       | `media_info`: magic-byte MIME via infer crate + image dimensions |
 | Media caching                  | ✅       | ❌       | P3       |                                         |
-| Vision model integration       | ✅       | ❌       | P2       | Image understanding                     |
+| Vision model integration       | ✅       | ✅       | P2       | `image_analyze` tool: base64 data-URI, 1-10 images, 20 MiB each, multi-modal LLM prompt via `ContentPart` |
 | TTS (Edge TTS)                 | ✅       | ❌       | P3       | Text-to-speech                          |
 | TTS (OpenAI)                   | ✅       | ❌       | P3       |                                         |
 | Incremental TTS playback       | ✅       | ❌       | P3       | iOS progressive playback                |
