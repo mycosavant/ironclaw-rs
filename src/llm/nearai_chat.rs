@@ -776,7 +776,12 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
                 // Convert assistant tool_calls into descriptive text
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(text) = msg.content.as_ref().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(text) = msg
+                    .content
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     parts.push(text.to_string());
                 }
                 for tc in calls {
@@ -842,10 +847,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
         // back to a plain string value.  Assistant messages that are solely
         // tool-call placeholders have null content in the wire format.
         let content = if let Some(parts) = msg.content_parts {
-            Some(
-                serde_json::to_value(&parts)
-                    .unwrap_or(serde_json::Value::String(msg.content)),
-            )
+            Some(serde_json::to_value(&parts).unwrap_or(serde_json::Value::String(msg.content)))
         } else if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
             None
         } else {
@@ -1016,7 +1018,10 @@ mod tests {
         let msg = ChatMessage::user("Hello");
         let chat_msg: ChatCompletionMessage = msg.into();
         assert_eq!(chat_msg.role, "user");
-        assert_eq!(chat_msg.content, Some(serde_json::Value::String("Hello".to_string())));
+        assert_eq!(
+            chat_msg.content,
+            Some(serde_json::Value::String("Hello".to_string()))
+        );
     }
 
     #[test]

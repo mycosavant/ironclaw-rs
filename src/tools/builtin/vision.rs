@@ -189,10 +189,7 @@ impl Tool for ImageAnalyzeTool {
 
             // Base64-encode on a blocking thread (CPU-bound for large images).
             let (mime_owned, b64) = tokio::task::spawn_blocking(move || {
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &raw,
-                );
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw);
                 (mime, b64)
             })
             .await
@@ -352,10 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_paths_returns_invalid_input() {
         let err = make_tool("ok")
-            .execute(
-                serde_json::json!({"question": "describe"}),
-                &make_context(),
-            )
+            .execute(serde_json::json!({"question": "describe"}), &make_context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters(_)));
