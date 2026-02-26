@@ -875,6 +875,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                reasoning_content: None,
             })
         }
 
@@ -888,6 +889,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                reasoning_content: None,
             })
         }
     }
@@ -912,6 +914,7 @@ mod tests {
             heartbeat_tick: None,
             routine_tick: None,
             repair_tick: None,
+            job_event_tx: None,
         };
 
         Agent::new(

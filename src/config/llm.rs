@@ -75,6 +75,11 @@ pub struct AnthropicDirectConfig {
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
+    /// Extra `anthropic-beta` header values (comma-separated in API).
+    ///
+    /// Parsed from `ANTHROPIC_BETA_HEADERS` env var.
+    /// Example: `["interleaved-thinking-2025-05-14"]`
+    pub beta_headers: Vec<String>,
 }
 
 /// Configuration for local Ollama.
@@ -102,6 +107,93 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Thinking budget level for models that support extended thinking.
+///
+/// Maps to a fixed token budget per level. `None` disables thinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingLevel {
+    /// No thinking (default).
+    #[default]
+    None,
+    /// Low budget (1 024 tokens).
+    Low,
+    /// Medium budget (8 192 tokens).
+    Medium,
+    /// High budget (32 768 tokens).
+    High,
+}
+
+impl ThinkingLevel {
+    /// Token budget for this level, or `None` if thinking is disabled.
+    pub fn budget_tokens(self) -> Option<u32> {
+        match self {
+            Self::None => Option::None,
+            Self::Low => Some(1_024),
+            Self::Medium => Some(8_192),
+            Self::High => Some(32_768),
+        }
+    }
+}
+
+impl std::str::FromStr for ThinkingLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "off" | "disabled" | "" => Ok(Self::None),
+            "low" => Ok(Self::Low),
+            "medium" | "med" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(format!(
+                "invalid thinking level '{}', expected one of: none, low, medium, high",
+                s
+            )),
+        }
+    }
+}
+
+/// Per-model thinking budget configuration.
+///
+/// The default level applies to all models unless overridden by a prefix match
+/// in `model_overrides`. Longest prefix wins.
+#[derive(Debug, Clone)]
+pub struct ThinkingConfig {
+    /// Default thinking level for all models.
+    pub default_level: ThinkingLevel,
+    /// Per-model overrides: `(model_prefix, level)`.
+    ///
+    /// Parsed from `THINKING_MODEL_OVERRIDES` env var
+    /// (format: `prefix=level,prefix=level`).
+    pub model_overrides: Vec<(String, ThinkingLevel)>,
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            default_level: ThinkingLevel::None,
+            model_overrides: Vec::new(),
+        }
+    }
+}
+
+impl ThinkingConfig {
+    /// Resolve the thinking level for a given model name.
+    ///
+    /// Uses longest-prefix match from `model_overrides`, falling back to
+    /// `default_level`.
+    pub fn resolve_for_model(&self, model: &str) -> ThinkingLevel {
+        let mut best: Option<&ThinkingLevel> = Option::None;
+        let mut best_len: usize = 0;
+        for (prefix, level) in &self.model_overrides {
+            if model.starts_with(prefix.as_str()) && prefix.len() > best_len {
+                best = Some(level);
+                best_len = prefix.len();
+            }
+        }
+        best.copied().unwrap_or(self.default_level)
+    }
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -122,6 +214,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Extended thinking budget configuration.
+    pub thinking: ThinkingConfig,
 }
 
 /// NEAR AI configuration.
@@ -268,10 +362,19 @@ impl LlmConfig {
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            let beta_headers = optional_env("ANTHROPIC_BETA_HEADERS")?
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             Some(AnthropicDirectConfig {
                 api_key,
                 model,
                 base_url,
+                beta_headers,
             })
         } else {
             None
@@ -325,6 +428,26 @@ impl LlmConfig {
             None
         };
 
+        // Thinking config
+        let thinking_default: ThinkingLevel = optional_env("THINKING_DEFAULT")?
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "THINKING_DEFAULT".to_string(),
+                message: e,
+            })?
+            .unwrap_or(ThinkingLevel::None);
+
+        let thinking_overrides = optional_env("THINKING_MODEL_OVERRIDES")?
+            .map(|v| parse_thinking_overrides(&v))
+            .transpose()?
+            .unwrap_or_default();
+
+        let thinking = ThinkingConfig {
+            default_level: thinking_default,
+            model_overrides: thinking_overrides,
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -333,8 +456,49 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            thinking,
         })
     }
+}
+
+/// Parse `THINKING_MODEL_OVERRIDES` into a list of (prefix, level) pairs.
+///
+/// Format: `prefix=level,prefix=level` (e.g. `claude-opus=high,claude-sonnet=medium`)
+fn parse_thinking_overrides(val: &str) -> Result<Vec<(String, ThinkingLevel)>, ConfigError> {
+    if val.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut overrides = Vec::new();
+    for pair in val.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((prefix, level_str)) = pair.split_once('=') else {
+            return Err(ConfigError::InvalidValue {
+                key: "THINKING_MODEL_OVERRIDES".to_string(),
+                message: format!("malformed entry '{}', expected prefix=level", pair),
+            });
+        };
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                key: "THINKING_MODEL_OVERRIDES".to_string(),
+                message: format!("empty prefix in entry '{}'", pair),
+            });
+        }
+        let level: ThinkingLevel =
+            level_str
+                .trim()
+                .parse()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "THINKING_MODEL_OVERRIDES".to_string(),
+                    message: format!("in entry '{}': {}", pair, e),
+                })?;
+        overrides.push((prefix.to_string(), level));
+    }
+    Ok(overrides)
 }
 
 /// Parse `LLM_EXTRA_HEADERS` value into a list of (key, value) pairs.
@@ -507,5 +671,94 @@ mod tests {
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
         );
+    }
+
+    // -- ThinkingLevel / ThinkingConfig tests --
+
+    #[test]
+    fn test_thinking_level_parse() {
+        assert_eq!(
+            "none".parse::<ThinkingLevel>().unwrap(),
+            ThinkingLevel::None
+        );
+        assert_eq!("off".parse::<ThinkingLevel>().unwrap(), ThinkingLevel::None);
+        assert_eq!("low".parse::<ThinkingLevel>().unwrap(), ThinkingLevel::Low);
+        assert_eq!(
+            "medium".parse::<ThinkingLevel>().unwrap(),
+            ThinkingLevel::Medium
+        );
+        assert_eq!(
+            "med".parse::<ThinkingLevel>().unwrap(),
+            ThinkingLevel::Medium
+        );
+        assert_eq!(
+            "high".parse::<ThinkingLevel>().unwrap(),
+            ThinkingLevel::High
+        );
+        assert!("invalid".parse::<ThinkingLevel>().is_err());
+    }
+
+    #[test]
+    fn test_thinking_level_budget() {
+        assert_eq!(ThinkingLevel::None.budget_tokens(), Option::None);
+        assert_eq!(ThinkingLevel::Low.budget_tokens(), Some(1_024));
+        assert_eq!(ThinkingLevel::Medium.budget_tokens(), Some(8_192));
+        assert_eq!(ThinkingLevel::High.budget_tokens(), Some(32_768));
+    }
+
+    #[test]
+    fn test_thinking_config_resolve_default() {
+        let config = ThinkingConfig {
+            default_level: ThinkingLevel::Medium,
+            model_overrides: Vec::new(),
+        };
+        assert_eq!(config.resolve_for_model("anything"), ThinkingLevel::Medium);
+    }
+
+    #[test]
+    fn test_thinking_config_resolve_longest_prefix() {
+        let config = ThinkingConfig {
+            default_level: ThinkingLevel::None,
+            model_overrides: vec![
+                ("claude".to_string(), ThinkingLevel::Low),
+                ("claude-opus".to_string(), ThinkingLevel::High),
+            ],
+        };
+        assert_eq!(
+            config.resolve_for_model("claude-opus-4-20250514"),
+            ThinkingLevel::High
+        );
+        assert_eq!(
+            config.resolve_for_model("claude-sonnet-4-20250514"),
+            ThinkingLevel::Low
+        );
+        assert_eq!(config.resolve_for_model("gpt-4o"), ThinkingLevel::None);
+    }
+
+    #[test]
+    fn test_parse_thinking_overrides() {
+        let result = parse_thinking_overrides("claude-opus=high, claude-sonnet=medium").unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ("claude-opus".to_string(), ThinkingLevel::High));
+        assert_eq!(
+            result[1],
+            ("claude-sonnet".to_string(), ThinkingLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn test_parse_thinking_overrides_empty() {
+        let result = parse_thinking_overrides("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_thinking_overrides_malformed() {
+        assert!(parse_thinking_overrides("no_equals_sign").is_err());
+    }
+
+    #[test]
+    fn test_parse_thinking_overrides_invalid_level() {
+        assert!(parse_thinking_overrides("prefix=bogus").is_err());
     }
 }

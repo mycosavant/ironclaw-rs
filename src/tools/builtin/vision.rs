@@ -166,10 +166,7 @@ impl Tool for ImageAnalyzeTool {
             // OS-reported file size before reading any bytes.  The post-read
             // length check remains as a defence-in-depth fallback.
             let metadata = tokio::fs::metadata(&abs_path).await.map_err(|e| {
-                Self::failed(format!(
-                    "failed to stat '{}': {e}",
-                    abs_path.display()
-                ))
+                Self::failed(format!("failed to stat '{}': {e}", abs_path.display()))
             })?;
             if metadata.len() as usize > MAX_IMAGE_BYTES {
                 return Err(Self::invalid(format!(
@@ -293,6 +290,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 20,
                 finish_reason: FinishReason::Stop,
+                reasoning_content: None,
             })
         }
 

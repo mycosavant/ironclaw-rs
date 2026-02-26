@@ -71,6 +71,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning_content: None,
         })
     }
 
@@ -96,6 +97,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
+                reasoning_content: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -104,6 +106,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
+                reasoning_content: None,
             })
         }
     }
@@ -142,6 +145,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning_content: None,
         })
     }
 
@@ -155,6 +159,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning_content: None,
         })
     }
 
@@ -205,6 +210,7 @@ async fn start_test_server_with_provider(
         heartbeat_last_tick: None,
         routine_last_tick: None,
         repair_last_tick: None,
+        channel_health: None,
         session_store: ironclaw::channels::web::session_store::new_session_store(),
     });
 
@@ -698,6 +704,7 @@ async fn test_no_llm_provider_returns_503() {
         heartbeat_last_tick: None,
         routine_last_tick: None,
         repair_last_tick: None,
+        channel_health: None,
         session_store: ironclaw::channels::web::session_store::new_session_store(),
     });
 

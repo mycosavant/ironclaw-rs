@@ -8,8 +8,13 @@ use crate::error::ConfigError;
 pub struct SkillsConfig {
     /// Whether the skills system is enabled.
     pub enabled: bool,
-    /// Directory containing local skills (default: ~/.ironclaw/skills/).
+    /// Directory containing local/user skills (default: ~/.ironclaw/skills/).
     pub local_dir: PathBuf,
+    /// Directory for registry-installed skills (default: ~/.ironclaw/installed_skills/).
+    ///
+    /// Skills installed from ClawHub land here with `SkillTrust::Installed` (read-only tools).
+    /// Kept separate from `local_dir` to enforce trust boundary at the filesystem level.
+    pub installed_dir: PathBuf,
     /// Maximum number of skills that can be active simultaneously.
     pub max_active_skills: usize,
     /// Maximum total context tokens allocated to skill prompts.
@@ -21,6 +26,7 @@ impl Default for SkillsConfig {
         Self {
             enabled: false,
             local_dir: default_skills_dir(),
+            installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
             max_context_tokens: 4000,
         }
@@ -35,6 +41,14 @@ fn default_skills_dir() -> PathBuf {
         .join("skills")
 }
 
+/// Get the default installed skills directory (~/.ironclaw/installed_skills/).
+fn default_installed_skills_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("installed_skills")
+}
+
 impl SkillsConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
@@ -42,6 +56,9 @@ impl SkillsConfig {
             local_dir: optional_env("SKILLS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_skills_dir),
+            installed_dir: optional_env("SKILLS_INSTALLED_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_installed_skills_dir),
             max_active_skills: parse_optional_env("SKILLS_MAX_ACTIVE", 3)?,
             max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
         })

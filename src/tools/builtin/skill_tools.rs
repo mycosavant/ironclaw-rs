@@ -318,7 +318,7 @@ impl Tool for SkillInstallTool {
                 )));
             }
 
-            (guard.user_dir().to_path_buf(), skill_name)
+            (guard.installed_dir().to_path_buf(), skill_name)
         };
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
@@ -327,6 +327,8 @@ impl Tool for SkillInstallTool {
                 &user_dir,
                 &skill_name_from_parse,
                 &crate::skills::normalize_line_endings(&content),
+                crate::skills::SkillTrust::Installed,
+                crate::skills::SkillSource::Installed,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -563,10 +565,15 @@ mod tests {
     use super::*;
 
     fn test_registry() -> Arc<std::sync::RwLock<SkillRegistry>> {
-        let dir = tempfile::tempdir().unwrap();
-        // Keep the tempdir so it lives for the test duration
-        let path = dir.keep();
-        Arc::new(std::sync::RwLock::new(SkillRegistry::new(path)))
+        let user_dir = tempfile::tempdir().unwrap();
+        let installed_dir = tempfile::tempdir().unwrap();
+        // Keep the tempdirs so they live for the test duration
+        let user_path = user_dir.keep();
+        let installed_path = installed_dir.keep();
+        Arc::new(std::sync::RwLock::new(SkillRegistry::new(
+            user_path,
+            installed_path,
+        )))
     }
 
     fn test_catalog() -> Arc<SkillCatalog> {

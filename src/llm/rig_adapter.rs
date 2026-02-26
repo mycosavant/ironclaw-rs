@@ -34,6 +34,10 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    /// Extra params merged into every rig-core request (e.g. `{"thinking": ...}`).
+    additional_params: Option<serde_json::Value>,
+    /// When true, force `temperature = None` (Anthropic thinking constraint).
+    thinking_enabled: bool,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -47,6 +51,28 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            additional_params: None,
+            thinking_enabled: false,
+        }
+    }
+
+    /// Create an adapter with additional request params and thinking mode flag.
+    pub fn with_params(
+        model: M,
+        model_name: impl Into<String>,
+        additional_params: Option<serde_json::Value>,
+        thinking_enabled: bool,
+    ) -> Self {
+        let name = model_name.into();
+        let (input_cost, output_cost) =
+            costs::model_cost(&name).unwrap_or_else(costs::default_cost);
+        Self {
+            model,
+            model_name: name,
+            input_cost,
+            output_cost,
+            additional_params,
+            thinking_enabled,
         }
     }
 }
@@ -313,13 +339,19 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
     }
 }
 
-/// Extract text and tool calls from a rig-core completion response.
+/// Extract text, tool calls, and reasoning content from a rig-core completion response.
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
-) -> (Option<String>, Vec<IronToolCall>, FinishReason) {
+) -> (
+    Option<String>,
+    Vec<IronToolCall>,
+    FinishReason,
+    Option<String>,
+) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<IronToolCall> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
 
     for content in choice.iter() {
         match content {
@@ -335,7 +367,14 @@ fn extract_response(
                     arguments: tc.function.arguments.clone(),
                 });
             }
-            // Reasoning and Image variants are not mapped to IronClaw types
+            AssistantContent::Reasoning(r) => {
+                for part in &r.reasoning {
+                    if !part.is_empty() {
+                        reasoning_parts.push(part.clone());
+                    }
+                }
+            }
+            // Image and future variants are not mapped to IronClaw types
             _ => {}
         }
     }
@@ -346,13 +385,19 @@ fn extract_response(
         Some(text_parts.join(""))
     };
 
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+
     let finish = if !tool_calls.is_empty() {
         FinishReason::ToolUse
     } else {
         FinishReason::Stop
     };
 
-    (text, tool_calls, finish)
+    (text, tool_calls, finish, reasoning)
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -368,6 +413,7 @@ fn build_rig_request(
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    additional_params: Option<serde_json::Value>,
 ) -> Result<RigRequest, LlmError> {
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
@@ -387,7 +433,7 @@ fn build_rig_request(
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
-        additional_params: None,
+        additional_params,
     })
 }
 
@@ -420,13 +466,21 @@ where
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
 
+        // Anthropic requires temperature=None when thinking is enabled.
+        let temperature = if self.thinking_enabled {
+            None
+        } else {
+            request.temperature
+        };
+
         let rig_req = build_rig_request(
             preamble,
             history,
             Vec::new(),
             None,
-            request.temperature,
+            temperature,
             request.max_tokens,
+            self.additional_params.clone(),
         )?;
 
         let response =
@@ -438,13 +492,15 @@ where
                     reason: e.to_string(),
                 })?;
 
-        let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, _tool_calls, finish, reasoning) =
+            extract_response(&response.choice, &response.usage);
 
         Ok(CompletionResponse {
             content: text.unwrap_or_default(),
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            reasoning_content: reasoning,
         })
     }
 
@@ -471,13 +527,21 @@ where
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
+        // Anthropic requires temperature=None when thinking is enabled.
+        let temperature = if self.thinking_enabled {
+            None
+        } else {
+            request.temperature
+        };
+
         let rig_req = build_rig_request(
             preamble,
             history,
             tools,
             tool_choice,
-            request.temperature,
+            temperature,
             request.max_tokens,
+            self.additional_params.clone(),
         )?;
 
         let response =
@@ -489,7 +553,8 @@ where
                     reason: e.to_string(),
                 })?;
 
-        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, mut tool_calls, finish, reasoning) =
+            extract_response(&response.choice, &response.usage);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -510,6 +575,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            reasoning_content: reasoning,
         })
     }
 
@@ -694,10 +760,11 @@ mod tests {
     fn test_extract_response_text_only() {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish, reasoning) = extract_response(&content, &usage);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
+        assert!(reasoning.is_none());
     }
 
     #[test]
@@ -705,11 +772,24 @@ mod tests {
         let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish, _reasoning) = extract_response(&content, &usage);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
         assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_extract_response_reasoning() {
+        let items = vec![
+            AssistantContent::reasoning("Let me think..."),
+            AssistantContent::text("The answer is 42"),
+        ];
+        let content = OneOrMany::many(items).unwrap();
+        let usage = RigUsage::new();
+        let (text, _calls, _finish, reasoning) = extract_response(&content, &usage);
+        assert_eq!(text, Some("The answer is 42".to_string()));
+        assert_eq!(reasoning, Some("Let me think...".to_string()));
     }
 
     #[test]

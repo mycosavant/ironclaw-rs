@@ -705,7 +705,13 @@ impl AppBuilder {
 
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
-            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone());
+            // Ensure skill directories exist before constructing the registry
+            let _ = tokio::fs::create_dir_all(&self.config.skills.local_dir).await;
+            let _ = tokio::fs::create_dir_all(&self.config.skills.installed_dir).await;
+            let mut registry = SkillRegistry::new(
+                self.config.skills.local_dir.clone(),
+                self.config.skills.installed_dir.clone(),
+            );
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));

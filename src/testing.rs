@@ -168,6 +168,7 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning_content: None,
         })
     }
 
@@ -185,6 +186,7 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning_content: None,
         })
     }
 }
@@ -295,6 +297,7 @@ impl TestHarnessBuilder {
             heartbeat_tick: None,
             routine_tick: None,
             repair_tick: None,
+            job_event_tx: None,
         };
 
         TestHarness {

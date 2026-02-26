@@ -19,10 +19,7 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::{
-    ChannelHealthMonitor, ChannelManager, HealthMonitorConfig, IncomingMessage, OutgoingResponse,
-    StatusUpdate,
-};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{
     AgentConfig, ConfigWatcher, HeartbeatConfig, HotReloadConfig, RoutineConfig, SkillsConfig,
 };
@@ -85,6 +82,10 @@ pub struct AgentDeps {
     pub routine_tick: Option<Arc<AtomicI64>>,
     /// Shared atomic updated on every self-repair tick.
     pub repair_tick: Option<Arc<AtomicI64>>,
+    /// Broadcast channel for real-time job events (tool use, state changes) to
+    /// the web gateway SSE/WebSocket clients. `None` when no gateway is active.
+    pub job_event_tx:
+        Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
 }
 
 /// The main agent that coordinates all components.
@@ -131,6 +132,7 @@ impl Agent {
             deps.tools.clone(),
             deps.store.clone(),
             deps.hooks.clone(),
+            deps.job_event_tx.clone(),
         ));
 
         Self {
@@ -232,11 +234,7 @@ impl Agent {
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
-        // Spawn channel health watchdog — periodically calls health_check on every
-        // registered channel and injects system notifications on state transitions.
-        let _health_monitor =
-            ChannelHealthMonitor::new(Arc::clone(&self.channels), HealthMonitorConfig::default())
-                .spawn();
+        // Channel health monitor is spawned in main.rs (with shared state for API/SSE).
 
         // Spawn config hot-reload watcher — detects changes to config.toml /
         // settings.json and injects a system notification so the operator knows to

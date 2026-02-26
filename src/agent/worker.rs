@@ -34,6 +34,9 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
+    /// Broadcast channel for real-time job events to the web gateway.
+    pub job_event_tx:
+        Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
 }
 
 /// Worker that executes a single job.
@@ -121,6 +124,16 @@ impl Worker {
         }
     }
 
+    /// Broadcast an SSE event for real-time UI streaming.
+    ///
+    /// This is the real-time counterpart to `log_event()` (DB persistence).
+    /// Events flow through `job_event_tx` -> main.rs bridge -> `SseManager::broadcast()`.
+    fn broadcast_sse(&self, event: crate::channels::web::types::SseEvent) {
+        if let Some(ref tx) = self.deps.job_event_tx {
+            let _ = tx.send((self.job_id, event));
+        }
+    }
+
     /// Run the worker until the job is complete or stopped.
     pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
         tracing::info!("Worker starting for job {}", self.job_id);
@@ -134,6 +147,11 @@ impl Worker {
             }
             Some(WorkerMessage::Ping) => {}
         }
+
+        self.broadcast_sse(crate::channels::web::types::SseEvent::JobStatus {
+            job_id: self.job_id.to_string(),
+            message: "Worker started".to_string(),
+        });
 
         // Get job context
         let job_ctx = self.context_manager().get_context(self.job_id).await?;
@@ -732,6 +750,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     &selection.parameters.to_string(), 500),
             }),
         );
+        self.broadcast_sse(crate::channels::web::types::SseEvent::JobToolUse {
+            job_id: self.job_id.to_string(),
+            tool_name: selection.tool_name.clone(),
+            input: serde_json::json!({
+                "input": crate::agent::agent_loop::truncate_for_preview(
+                    &selection.parameters.to_string(), 500),
+            }),
+        });
 
         match result {
             Ok(output) => {
@@ -779,6 +805,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     "success": true,
                     "output": crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
                 }));
+                self.broadcast_sse(crate::channels::web::types::SseEvent::JobToolResult {
+                    job_id: self.job_id.to_string(),
+                    tool_name: selection.tool_name.clone(),
+                    output: crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
+                });
 
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
@@ -814,6 +845,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         "output": format!("Error: {}", e),
                     }),
                 );
+                self.broadcast_sse(crate::channels::web::types::SseEvent::JobToolResult {
+                    job_id: self.job_id.to_string(),
+                    tool_name: selection.tool_name.clone(),
+                    output: format!("Error: {}", e),
+                });
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
                     &selection.tool_call_id,
@@ -947,6 +983,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             JobState::Completed,
             Some("Job completed successfully".to_string()),
         );
+        self.broadcast_sse(crate::channels::web::types::SseEvent::JobResult {
+            job_id: self.job_id.to_string(),
+            status: "completed".to_string(),
+            session_id: None,
+        });
         Ok(())
     }
 
@@ -969,6 +1010,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }),
         );
         self.persist_status(JobState::Failed, Some(reason.to_string()));
+        self.broadcast_sse(crate::channels::web::types::SseEvent::JobResult {
+            job_id: self.job_id.to_string(),
+            status: "failed".to_string(),
+            session_id: None,
+        });
         Ok(())
     }
 
@@ -989,6 +1035,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }),
         );
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
+        self.broadcast_sse(crate::channels::web::types::SseEvent::JobStatus {
+            job_id: self.job_id.to_string(),
+            message: format!("Job stuck: {}", reason),
+        });
         Ok(())
     }
 }
@@ -1102,6 +1152,7 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookRegistry::new()),
             timeout: Duration::from_secs(30),
             use_planning: false,
+            job_event_tx: None,
         };
 
         Worker::new(job_id, deps)

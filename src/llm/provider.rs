@@ -257,6 +257,8 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Reasoning/thinking content from models that support extended thinking.
+    pub reasoning_content: Option<String>,
 }
 
 /// Why the completion finished.
@@ -358,6 +360,8 @@ pub struct ToolCompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Reasoning/thinking content from models that support extended thinking.
+    pub reasoning_content: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.

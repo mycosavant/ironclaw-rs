@@ -187,6 +187,8 @@ pub struct GatewayState {
     pub routine_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
     /// Unix seconds of the last self-repair sweep tick.
     pub repair_last_tick: Option<Arc<std::sync::atomic::AtomicI64>>,
+    /// Shared per-channel health state from the background health monitor.
+    pub channel_health: Option<crate::channels::SharedChannelHealth>,
     /// Short-lived gateway session store.
     ///
     /// Maps opaque session tokens to [`session_store::GatewaySession`] metadata.
@@ -305,6 +307,8 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Channels
+        .route("/api/channels", get(channels_health_handler))
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
@@ -2265,6 +2269,46 @@ async fn pairing_approve_handler(
     }
 }
 
+// --- Channel health handler ---
+
+async fn channels_health_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<ChannelHealthResponse> {
+    use crate::channels::ChannelStatus;
+
+    let channels = if let Some(ref shared) = state.channel_health {
+        let guard = shared.read().await;
+        let mut list: Vec<crate::channels::ChannelHealthSnapshot> =
+            guard.values().cloned().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
+    } else {
+        vec![]
+    };
+
+    let summary = ChannelHealthSummary {
+        total: channels.len(),
+        healthy: channels
+            .iter()
+            .filter(|c| c.status == ChannelStatus::Healthy)
+            .count(),
+        degraded: channels
+            .iter()
+            .filter(|c| c.status == ChannelStatus::Degraded)
+            .count(),
+        failed: channels
+            .iter()
+            .filter(|c| c.status == ChannelStatus::Failed)
+            .count(),
+        unknown: channels
+            .iter()
+            .filter(|c| c.status == ChannelStatus::Unknown)
+            .count(),
+    };
+
+    Json(ChannelHealthResponse { channels, summary })
+}
+
 // --- Skills handlers ---
 
 async fn skills_list_handler(
@@ -2424,7 +2468,7 @@ async fn skills_install_handler(
             ))));
         }
 
-        (guard.user_dir().to_path_buf(), skill_name)
+        (guard.installed_dir().to_path_buf(), skill_name)
     };
 
     // Perform async I/O (write to disk, load) with no lock held.
@@ -2434,6 +2478,8 @@ async fn skills_install_handler(
             &user_dir,
             &skill_name_from_parse,
             &normalized,
+            crate::skills::SkillTrust::Installed,
+            crate::skills::SkillSource::Installed,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

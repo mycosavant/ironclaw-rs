@@ -40,7 +40,7 @@ pub use self::hot_reload::{ConfigReloadEvent, ConfigWatcher, HotReloadConfig};
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
+    OpenAiCompatibleConfig, OpenAiDirectConfig, ThinkingConfig, ThinkingLevel, TinfoilConfig,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;

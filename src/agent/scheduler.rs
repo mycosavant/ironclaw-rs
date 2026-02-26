@@ -51,6 +51,9 @@ pub struct Scheduler {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
+    /// Broadcast channel for real-time job events to the web gateway.
+    job_event_tx:
+        Option<tokio::sync::broadcast::Sender<(Uuid, crate::channels::web::types::SseEvent)>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -59,6 +62,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     /// Create a new scheduler.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
         context_manager: Arc<ContextManager>,
@@ -67,6 +71,9 @@ impl Scheduler {
         tools: Arc<ToolRegistry>,
         store: Option<Arc<dyn Database>>,
         hooks: Arc<HookRegistry>,
+        job_event_tx: Option<
+            tokio::sync::broadcast::Sender<(Uuid, crate::channels::web::types::SseEvent)>,
+        >,
     ) -> Self {
         Self {
             config,
@@ -76,6 +83,7 @@ impl Scheduler {
             tools,
             store,
             hooks,
+            job_event_tx,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -169,6 +177,7 @@ impl Scheduler {
                 hooks: self.hooks.clone(),
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
+                job_event_tx: self.job_event_tx.clone(),
             };
             let worker = Worker::new(job_id, deps);
 

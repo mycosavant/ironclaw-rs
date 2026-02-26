@@ -1,5 +1,6 @@
 //! IronClaw - Main entry point.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 
@@ -10,13 +11,14 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
+        ChannelHealthMonitor, ChannelHealthSnapshot, ChannelManager, GatewayChannel,
+        HealthMonitorConfig, HttpChannel, ReplChannel, SharedChannelHealth, WebhookServer,
         WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
-        web::log_layer::LogBroadcaster,
+        web::{log_layer::LogBroadcaster, types::SseEvent},
     },
     cli::{
         Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
@@ -247,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
 
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
-    > = if config.sandbox.enabled {
+    > = if config.sandbox.enabled || config.channels.gateway.is_some() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
     } else {
@@ -459,9 +461,15 @@ async fn main() -> anyhow::Result<()> {
     let routine_tick = Arc::new(AtomicI64::new(0));
     let repair_tick = Arc::new(AtomicI64::new(0));
 
+    // ── Shared channel health ────────────────────────────────────────────
+
+    let channel_health: SharedChannelHealth = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
+    let mut gateway_state_for_health: Option<Arc<ironclaw::channels::web::server::GatewayState>> =
+        None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -493,16 +501,19 @@ async fn main() -> anyhow::Result<()> {
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
+        }
 
-            if let Some(ref tx) = job_event_tx {
-                let mut rx = tx.subscribe();
-                let gw_state = Arc::clone(gw.state());
-                tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
-                    }
-                });
-            }
+        // Bridge job events to SSE/WebSocket clients.
+        // This works for both sandbox workers (via orchestrator HTTP) and
+        // host-side workers (via direct broadcast through job_event_tx).
+        if let Some(ref tx) = job_event_tx {
+            let mut rx = tx.subscribe();
+            let gw_state = Arc::clone(gw.state());
+            tokio::spawn(async move {
+                while let Ok((_job_id, event)) = rx.recv().await {
+                    gw_state.sse.broadcast(event);
+                }
+            });
         }
 
         gateway_url = Some(format!(
@@ -517,6 +528,9 @@ async fn main() -> anyhow::Result<()> {
         gw = gw.with_heartbeat_tick(heartbeat_tick.clone());
         gw = gw.with_routine_tick(routine_tick.clone());
         gw = gw.with_repair_tick(repair_tick.clone());
+        gw = gw.with_channel_health(channel_health.clone());
+
+        gateway_state_for_health = Some(Arc::clone(gw.state()));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -571,6 +585,28 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(channels);
 
+    // Spawn channel health monitor — writes to shared state and pushes SSE on transitions.
+    {
+        let on_transition: Option<Arc<dyn Fn(Vec<ChannelHealthSnapshot>) + Send + Sync>> =
+            if let Some(ref gs) = gateway_state_for_health {
+                let gs = Arc::clone(gs);
+                Some(Arc::new(move |snapshots| {
+                    gs.sse.broadcast(SseEvent::ChannelHealth {
+                        channels: snapshots,
+                    });
+                }))
+            } else {
+                None
+            };
+        let _health_handle = ChannelHealthMonitor::new(
+            Arc::clone(&channels),
+            HealthMonitorConfig::default(),
+            channel_health,
+            on_transition,
+        )
+        .spawn();
+    }
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -602,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_tick: Some(heartbeat_tick),
         routine_tick: Some(routine_tick),
         repair_tick: Some(repair_tick),
+        job_event_tx: job_event_tx.clone(),
     };
 
     let agent = Agent::new(

@@ -168,7 +168,7 @@ pub async fn skills_install_handler(
             ))));
         }
 
-        (guard.user_dir().to_path_buf(), skill_name)
+        (guard.installed_dir().to_path_buf(), skill_name)
     };
 
     // Perform async I/O (write to disk, load) with no lock held.
@@ -178,6 +178,8 @@ pub async fn skills_install_handler(
             &user_dir,
             &skill_name_from_parse,
             &normalized,
+            crate::skills::SkillTrust::Installed,
+            crate::skills::SkillSource::Installed,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

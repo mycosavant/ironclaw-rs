@@ -46,7 +46,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tailscale integration               | ✅       | ❌       |                                                                                        |
 | Health check endpoints              | ✅       | ✅       | /api/health + /api/gateway/status                                                      |
 | `doctor` diagnostics                | ✅       | ✅       |                                                                                        |
-| Agent event broadcast               | ✅       | 🚧       | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired    |
+| Agent event broadcast               | ✅       | ✅       | SSE events emitted from Worker (tool_use, tool_result, status, result) and orchestrator |
 | Channel health monitor              | ✅       | ✅       | 3-state FSM (Healthy/Degraded/Failed); configurable thresholds; notifications injected |
 | Presence system                     | ✅       | ❌       | Beacons on connect, system presence for agents                                         |
 | Trusted-proxy auth mode             | ✅       | ❌       | Header-based auth for reverse proxies                                                  |
@@ -184,8 +184,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skills (modular capabilities)      | ✅       | ✅       | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector, memory access control (installed skills restricted to `skills/` + `public/` prefixes) |
 | Skill routing blocks               | ✅       | 🚧       | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks                                                                                           |
 | Skill path compaction              | ✅       | ❌       | ~ prefix to reduce prompt tokens                                                                                                                                                  |
-| Thinking modes (low/med/high)      | ✅       | ❌       | Configurable reasoning depth                                                                                                                                                      |
-| Per-model thinkingDefault override | ✅       | ❌       | Override thinking level per model                                                                                                                                                 |
+| Thinking modes (low/med/high)      | ✅       | ✅       | ThinkingLevel (None/Low/Medium/High) with budget_tokens, injected via additional_params                                                                                           |
+| Per-model thinkingDefault override | ✅       | ✅       | ThinkingConfig with model prefix matching via THINKING_MODEL_OVERRIDES                                                                                                            |
 | Block-level streaming              | ✅       | ❌       |                                                                                                                                                                                   |
 | Tool-level streaming               | ✅       | ❌       |                                                                                                                                                                                   |
 | Z.AI tool_stream                   | ✅       | ❌       | Real-time tool call streaming                                                                                                                                                     |
@@ -238,8 +238,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cooldown management        | ✅       | ✅       | Lock-free per-provider cooldown in `FailoverProvider` |
 | Per-session model override | ✅       | ✅       | Model selector in TUI                                 |
 | Model selection UI         | ✅       | ✅       | TUI keyboard shortcut                                 |
-| Per-model thinkingDefault  | ✅       | ❌       | Override thinking level per model in config           |
-| 1M context beta header     | ✅       | ❌       | Anthropic extended context support                    |
+| Per-model thinkingDefault  | ✅       | ✅       | ThinkingConfig with longest-prefix model matching     |
+| 1M context beta header     | ✅       | ✅       | ANTHROPIC_BETA_HEADERS env var, auto-adds thinking beta |
 
 ### Owner: _Unassigned_
 
@@ -386,7 +386,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature                 | OpenClaw | IronClaw | Priority | Notes                                                 |
 | ----------------------- | -------- | -------- | -------- | ----------------------------------------------------- |
 | Control UI Dashboard    | ✅       | ✅       | -        | Web gateway with chat, memory, jobs, logs, extensions |
-| Channel status view     | ✅       | 🚧       | P2       | Gateway status widget, full channel view pending      |
+| Channel status view     | ✅       | ✅       | -        | Per-channel health dashboard (REST, SSE, web UI, CLI) |
 | Agent management        | ✅       | ❌       | P3       |                                                       |
 | Model selection         | ✅       | ✅       | -        | TUI only                                              |
 | Config editing          | ✅       | ❌       | P3       |                                                       |
@@ -465,7 +465,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Credential theft via env injection | ✅       | 🚧       | Shell env scrubbing + command injection detection; no full OC-09 defense                              |
 | Session file permissions (0o600)   | ✅       | ✅       | Session token file set to 0o600 in llm/session.rs                                                     |
 | Database encryption at rest        | ✅       | ✅       | libSQL: AES-256-CBC (SQLCipher) via `LIBSQL_ENCRYPTION_KEY`; HKDF-SHA256 key derivation               |
-| Skill download path restriction    | ✅       | ❌       | Prevent arbitrary write targets                                                                       |
+| Skill download path restriction    | ✅       | ✅       | Isolated installed_skills/ dir, symlink checks, canonical path containment                            |
 | Webhook signature verification     | ✅       | ✅       |                                                                                                       |
 | Media URL validation               | ✅       | ❌       |                                                                                                       |
 | Prompt injection defense           | ✅       | ✅       | Pattern detection, sanitization, injection circuit breaker (trips job at ≥5 high-severity detections) |

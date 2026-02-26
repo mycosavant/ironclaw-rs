@@ -239,6 +239,26 @@ async fn report_complete(
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
     }
 
+    // Broadcast the final result to the web gateway as a safety net.
+    // Host-side Workers broadcast their own JobResult, but sandbox workers
+    // (Docker containers) only report completion through this orchestrator
+    // endpoint, so we emit the event here to cover that path.
+    if let Some(ref tx) = state.job_event_tx {
+        let status = if report.success {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = tx.send((
+            job_id,
+            SseEvent::JobResult {
+                job_id: job_id.to_string(),
+                status: status.to_string(),
+                session_id: None,
+            },
+        ));
+    }
+
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 

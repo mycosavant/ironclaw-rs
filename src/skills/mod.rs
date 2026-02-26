@@ -89,6 +89,8 @@ pub enum SkillSource {
     User(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
+    /// Installed from ClawHub registry (~/.ironclaw/installed_skills/).
+    Installed(PathBuf),
 }
 
 /// Activation criteria parsed from SKILL.md frontmatter `activation` section.

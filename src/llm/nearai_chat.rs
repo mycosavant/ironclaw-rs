@@ -46,6 +46,8 @@ pub struct NearAiChatProvider {
     /// Per-model pricing fetched from the NEAR AI `/v1/model/list` endpoint.
     /// Maps model ID → (input_cost_per_token, output_cost_per_token).
     pricing: Arc<std::sync::RwLock<HashMap<String, (Decimal, Decimal)>>>,
+    /// Per-model thinking budget configuration.
+    thinking: crate::config::ThinkingConfig,
 }
 
 impl NearAiChatProvider {
@@ -58,7 +60,12 @@ impl NearAiChatProvider {
     /// By default this enables tool-message flattening for compatibility with
     /// providers that reject `role: "tool"` messages.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_flatten(config, session, true)
+        Self::new_with_options(
+            config,
+            session,
+            true,
+            crate::config::ThinkingConfig::default(),
+        )
     }
 
     /// Create a chat completions provider with configurable tool-message flattening.
@@ -66,6 +73,21 @@ impl NearAiChatProvider {
         config: NearAiConfig,
         session: Arc<SessionManager>,
         flatten_tool_messages: bool,
+    ) -> Result<Self, LlmError> {
+        Self::new_with_options(
+            config,
+            session,
+            flatten_tool_messages,
+            crate::config::ThinkingConfig::default(),
+        )
+    }
+
+    /// Create a chat completions provider with all options.
+    pub fn new_with_options(
+        config: NearAiConfig,
+        session: Arc<SessionManager>,
+        flatten_tool_messages: bool,
+        thinking: crate::config::ThinkingConfig,
     ) -> Result<Self, LlmError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -85,6 +107,7 @@ impl NearAiChatProvider {
             active_model,
             flatten_tool_messages,
             pricing,
+            thinking,
         };
 
         // Fire-and-forget background pricing fetch — don't block startup.
@@ -135,6 +158,21 @@ impl NearAiChatProvider {
     /// Returns true if using API key auth, false if session token auth.
     fn uses_api_key(&self) -> bool {
         self.config.api_key.is_some()
+    }
+
+    /// Resolve thinking config for a model, returning the JSON value and
+    /// whether thinking is enabled (which forces temperature to None).
+    fn resolve_thinking(&self, model: &str) -> (Option<serde_json::Value>, bool) {
+        let level = self.thinking.resolve_for_model(model);
+        if let Some(budget) = level.budget_tokens() {
+            let value = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+            (Some(value), true)
+        } else {
+            (None, false)
+        }
     }
 
     /// Resolve the Bearer token for the current auth mode.
@@ -396,6 +434,7 @@ impl NearAiChatProvider {
 impl LlmProvider for NearAiChatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let (thinking, thinking_enabled) = self.resolve_thinking(&model);
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
@@ -404,10 +443,15 @@ impl LlmProvider for NearAiChatProvider {
         let request = ChatCompletionRequest {
             model,
             messages,
-            temperature: req.temperature,
+            temperature: if thinking_enabled {
+                None
+            } else {
+                req.temperature
+            },
             max_tokens: req.max_tokens,
             tools: None,
             tool_choice: None,
+            thinking,
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -422,12 +466,13 @@ impl LlmProvider for NearAiChatProvider {
                     reason: "No choices in response".to_string(),
                 })?;
 
-        // Fall back to reasoning_content when content is null (same as
-        // complete_with_tools — reasoning models may put the answer there).
+        // Surface reasoning_content separately, and also fall back to it
+        // when content is null (reasoning models may put the answer there).
+        let reasoning_content = choice.message.reasoning_content;
         let content = choice
             .message
             .content
-            .or(choice.message.reasoning_content)
+            .or_else(|| reasoning_content.clone())
             .unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
@@ -444,6 +489,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
+            reasoning_content,
         })
     }
 
@@ -452,6 +498,7 @@ impl LlmProvider for NearAiChatProvider {
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let (thinking, thinking_enabled) = self.resolve_thinking(&model);
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
@@ -481,10 +528,15 @@ impl LlmProvider for NearAiChatProvider {
         let request = ChatCompletionRequest {
             model,
             messages,
-            temperature: req.temperature,
+            temperature: if thinking_enabled {
+                None
+            } else {
+                req.temperature
+            },
             max_tokens: req.max_tokens,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice: req.tool_choice,
+            thinking,
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -499,9 +551,10 @@ impl LlmProvider for NearAiChatProvider {
                     reason: "No choices in response".to_string(),
                 })?;
 
-        // Fall back to reasoning_content when content is null (e.g. GLM-5
-        // returns its answer in reasoning_content instead of content).
-        let content = choice.message.content.or(choice.message.reasoning_content);
+        // Surface reasoning_content separately, and also fall back to it
+        // when content is null (e.g. GLM-5 returns its answer there).
+        let reasoning_content = choice.message.reasoning_content;
+        let content = choice.message.content.or_else(|| reasoning_content.clone());
         let tool_calls: Vec<ToolCall> = choice
             .message
             .tool_calls
@@ -540,6 +593,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
+            reasoning_content,
         })
     }
 
@@ -601,6 +655,10 @@ struct ChatCompletionRequest {
     tools: Option<Vec<ChatCompletionTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Anthropic-style thinking config (budget_tokens).
+    /// Serialized as `{"type": "enabled", "budget_tokens": N}` when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

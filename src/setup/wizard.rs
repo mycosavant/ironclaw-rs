@@ -1182,6 +1182,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            thinking: crate::config::ThinkingConfig::default(),
         };
 
         match create_llm_provider(&config, session) {

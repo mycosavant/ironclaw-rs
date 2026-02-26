@@ -55,7 +55,9 @@ pub fn create_llm_provider(
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config.backend {
-        LlmBackend::NearAi => create_llm_provider_with_config(&config.nearai, session),
+        LlmBackend::NearAi => {
+            create_nearai_provider_with_thinking(&config.nearai, session, config.thinking.clone())
+        }
         LlmBackend::OpenAi => create_openai_provider(config),
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
@@ -84,6 +86,31 @@ pub fn create_llm_provider_with_config(
         "Using NEAR AI (Chat Completions API)"
     );
     Ok(Arc::new(NearAiChatProvider::new(config.clone(), session)?))
+}
+
+/// Create a NEAR AI provider with explicit thinking configuration.
+fn create_nearai_provider_with_thinking(
+    config: &NearAiConfig,
+    session: Arc<SessionManager>,
+    thinking: crate::config::ThinkingConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let auth_mode = if config.api_key.is_some() {
+        "API key"
+    } else {
+        "session token"
+    };
+    tracing::info!(
+        model = %config.model,
+        base_url = %config.base_url,
+        auth = auth_mode,
+        "Using NEAR AI (Chat Completions API)"
+    );
+    Ok(Arc::new(NearAiChatProvider::new_with_options(
+        config.clone(),
+        session,
+        true,
+        thinking,
+    )?))
 }
 
 fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -134,26 +161,60 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
 
     use rig::providers::anthropic;
 
-    let client: anthropic::Client = if let Some(ref base_url) = anth.base_url {
-        anthropic::Client::builder()
-            .api_key(anth.api_key.expose_secret())
-            .base_url(base_url)
-            .build()
-    } else {
-        anthropic::Client::new(anth.api_key.expose_secret())
+    // Always use builder pattern so we can inject beta headers.
+    let mut builder = anthropic::Client::builder().api_key(anth.api_key.expose_secret());
+
+    if let Some(ref base_url) = anth.base_url {
+        builder = builder.base_url(base_url);
     }
-    .map_err(|e| LlmError::RequestFailed {
+
+    // Resolve thinking for this model.
+    let thinking_level = config.thinking.resolve_for_model(&anth.model);
+
+    // Collect beta headers: explicit config + auto-add thinking beta when needed.
+    let mut betas: Vec<String> = anth.beta_headers.clone();
+    let thinking_beta = "interleaved-thinking-2025-05-14";
+    if thinking_level != crate::config::ThinkingLevel::None
+        && !betas.iter().any(|b| b == thinking_beta)
+    {
+        betas.push(thinking_beta.to_string());
+    }
+
+    if !betas.is_empty() {
+        let beta_refs: Vec<&str> = betas.iter().map(String::as_str).collect();
+        builder = builder.anthropic_betas(&beta_refs);
+        tracing::info!(betas = ?betas, "Injecting anthropic-beta headers");
+    }
+
+    let client: anthropic::Client = builder.build().map_err(|e| LlmError::RequestFailed {
         provider: "anthropic".to_string(),
         reason: format!("Failed to create Anthropic client: {}", e),
     })?;
 
     let model = client.completion_model(&anth.model);
+
+    // Build additional_params for thinking if enabled.
+    let additional_params = thinking_level.budget_tokens().map(|budget| {
+        serde_json::json!({
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": budget
+            }
+        })
+    });
+
     tracing::info!(
-        "Using Anthropic direct API (model: {}, base_url: {})",
+        "Using Anthropic direct API (model: {}, base_url: {}, thinking: {:?})",
         anth.model,
         anth.base_url.as_deref().unwrap_or("default"),
+        thinking_level,
     );
-    Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+    Ok(Arc::new(RigAdapter::with_params(
+        model,
+        &anth.model,
+        additional_params,
+        thinking_level != crate::config::ThinkingLevel::None,
+    )))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -290,9 +351,11 @@ pub fn create_cheap_llm_provider(
     let mut cheap_config = config.nearai.clone();
     cheap_config.model = cheap_model.clone();
 
-    Ok(Some(Arc::new(NearAiChatProvider::new(
+    Ok(Some(Arc::new(NearAiChatProvider::new_with_options(
         cheap_config,
         session,
+        true,
+        config.thinking.clone(),
     )?)))
 }
 
@@ -473,6 +536,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            thinking: crate::config::ThinkingConfig::default(),
         }
     }
 
