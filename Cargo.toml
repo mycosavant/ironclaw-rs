@@ -161,6 +161,9 @@ subtle = "2"                                                          # Constant
 ed25519-dalek = { version = "2", features = ["digest", "rand_core"] }
 hex = "0.4"                                                           # Hex encoding/decoding for public keys and signatures
 
+# LRU cache for LLM response caching
+lru = "0.12"
+
 # Multi-provider LLM support
 rig-core = "0.30"
 

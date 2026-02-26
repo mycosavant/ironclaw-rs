@@ -265,7 +265,21 @@ impl ConversationStore for LibSqlBackend {
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
-        // SQLite: use json_patch to merge the key
+        // SQLite / libSQL: RFC 7396 JSON Merge Patch via `json_patch(target, patch)`.
+        //
+        // Semantics shared with the PostgreSQL `||` operator:
+        //   • Top-level keys in `patch` replace the corresponding keys in `target`.
+        //   • Keys absent from `patch` are preserved.
+        //   • Keys present in `patch` with a JSON null VALUE are **deleted** from target.
+        //     (RFC 7396 §2 – patch = {"a": null} on {"a":1,"b":2} → {"b":2})
+        //
+        // This last point differs from PostgreSQL's `||` operator, which treats JSON null
+        // as a literal value and keeps the key:
+        //   SELECT '{"a":1}'::jsonb || '{"a":null}'::jsonb  →  {"a": null}   (PG)
+        //   SELECT json_patch('{"a":1}', '{"a":null}')       →  {}            (SQLite)
+        //
+        // Callers MUST NOT set a metadata field to SQL`null` JSON when cross-backend
+        // portability matters; use an empty string, 0, or false instead.
         let patch = serde_json::json!({ key: value });
         conn.execute(
             "UPDATE conversations SET metadata = json_patch(metadata, ?2) WHERE id = ?1",

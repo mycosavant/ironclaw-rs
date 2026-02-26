@@ -15,11 +15,12 @@
 //! └──────────────────────────────────────────────────┘
 //! ```
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use lru::LruCache;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -51,7 +52,7 @@ impl Default for ResponseCacheConfig {
 struct CacheEntry {
     response: CompletionResponse,
     created_at: Instant,
-    last_accessed: Instant,
+    /// Number of cache hits for this entry (statistics only).
     hit_count: u64,
 }
 
@@ -59,18 +60,29 @@ struct CacheEntry {
 ///
 /// Tool completion requests are always forwarded without caching since
 /// tool calls can have side effects that should not be replayed.
+///
+/// Eviction uses two cooperating mechanisms:
+/// - **Capacity** — `lru::LruCache` automatically evicts the least-recently-used
+///   entry in O(1) when the cache is at capacity, eliminating the previous O(n)
+///   linear scan over `HashMap`.
+/// - **TTL** — expired entries are lazily purged on each cache-miss insertion,
+///   so stale responses are never returned even when capacity is not exceeded.
 pub struct CachedProvider {
     inner: Arc<dyn LlmProvider>,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<LruCache<String, CacheEntry>>,
     config: ResponseCacheConfig,
 }
 
 impl CachedProvider {
     /// Wrap an existing provider with response caching.
     pub fn new(inner: Arc<dyn LlmProvider>, config: ResponseCacheConfig) -> Self {
+        // NonZeroUsize is required by LruCache::new; fall back to 1 if max_entries
+        // is somehow zero to avoid a panic (config validation should prevent this).
+        let capacity =
+            NonZeroUsize::new(config.max_entries).unwrap_or(NonZeroUsize::new(1).unwrap());
         Self {
             inner,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(LruCache::new(capacity)),
             config,
         }
     }
@@ -87,7 +99,7 @@ impl CachedProvider {
 
     /// Total cache hits across all entries.
     pub async fn total_hits(&self) -> u64 {
-        self.cache.lock().await.values().map(|e| e.hit_count).sum()
+        self.cache.lock().await.iter().map(|(_, e)| e.hit_count).sum()
     }
 
     /// Clear all cached entries.
@@ -148,51 +160,51 @@ impl LlmProvider for CachedProvider {
         let key = cache_key(&effective_model, &request);
         let now = Instant::now();
 
-        // Check cache
+        // Check cache — `get_mut` promotes the entry to most-recently-used (O(1)).
         {
             let mut guard = self.cache.lock().await;
-            if let Some(entry) = guard.get_mut(&key) {
-                if now.duration_since(entry.created_at) < self.config.ttl {
-                    entry.last_accessed = now;
+            match guard.get_mut(&key) {
+                Some(entry) if now.duration_since(entry.created_at) < self.config.ttl => {
                     entry.hit_count += 1;
                     tracing::debug!(hits = entry.hit_count, "response cache hit");
                     return Ok(entry.response.clone());
                 }
-                // Expired, remove it
-                guard.remove(&key);
+                Some(_) => {
+                    // Expired — evict so the miss path stores a fresh copy.
+                    guard.pop(&key);
+                }
+                None => {}
             }
         }
 
-        // Cache miss, call the real provider
+        // Cache miss — call the real provider.
         let response = self.inner.complete(request).await?;
 
-        // Store in cache
+        // Store in cache.
+        //
+        // 1. Lazily purge TTL-expired entries so stale responses are not retained
+        //    indefinitely when the cache is not at capacity.
+        // 2. `put` inserts the new entry; LruCache automatically evicts the
+        //    least-recently-used entry in O(1) when at capacity — no manual
+        //    O(n) scan needed.
         {
             let mut guard = self.cache.lock().await;
 
-            // Evict expired entries
-            guard.retain(|_, entry| now.duration_since(entry.created_at) < self.config.ttl);
-
-            // LRU eviction if over capacity
-            while guard.len() >= self.config.max_entries {
-                let oldest_key = guard
-                    .iter()
-                    .min_by_key(|(_, entry)| entry.last_accessed)
-                    .map(|(k, _)| k.clone());
-
-                if let Some(k) = oldest_key {
-                    guard.remove(&k);
-                } else {
-                    break;
-                }
+            // Lazy TTL sweep on miss (not on every operation to keep the hot path fast).
+            let expired_keys: Vec<String> = guard
+                .iter()
+                .filter(|(_, e)| now.duration_since(e.created_at) >= self.config.ttl)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in expired_keys {
+                guard.pop(&k);
             }
 
-            guard.insert(
+            guard.put(
                 key,
                 CacheEntry {
                     response: response.clone(),
                     created_at: now,
-                    last_accessed: now,
                     hit_count: 0,
                 },
             );

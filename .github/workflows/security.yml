@@ -1,0 +1,22 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly on Monday at 06:00 UTC — catches newly published advisories
+    - cron: '0 6 * * 1'
+
+jobs:
+  audit:
+    name: cargo audit (advisory DB)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Security audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

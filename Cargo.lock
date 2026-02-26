@@ -2345,6 +2345,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
  "serde",
 ]
@@ -2434,7 +2436,7 @@ dependencies = [
  "base64 0.22.1",
  "html-escape",
  "html5ever 0.38.0",
- "lru",
+ "lru 0.16.3",
  "once_cell",
  "regex",
  "serde",
@@ -2980,6 +2982,7 @@ dependencies = [
  "libc",
  "libsql",
  "lopdf",
+ "lru 0.12.5",
  "mime_guess",
  "notify",
  "open",
@@ -3406,6 +3409,15 @@ dependencies = [
  "rayon",
  "time",
  "weezl",
+]
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]

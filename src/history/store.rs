@@ -1489,6 +1489,20 @@ impl Store {
     }
 
     /// Merge a single key into a conversation's metadata JSONB.
+    ///
+    /// Uses PostgreSQL's `||` JSONB concatenation operator, which performs a shallow merge.
+    /// The top-level key is set to `value`, replacing any existing value for that key.
+    ///
+    /// # BACKEND SEMANTICS DIVERGENCE
+    ///
+    /// This operator differs from the libSQL backend's `json_patch` (RFC 7396) in one important way:
+    /// - **PostgreSQL `||`**: a JSON `null` value is retained as a literal null in the object.
+    ///   `SELECT '{"a":1}'::jsonb || '{"a":null}'::jsonb` → `{"a": null}`
+    /// - **libSQL `json_patch`** (RFC 7396 §2): a `null` value **deletes** the key entirely.
+    ///   `SELECT json_patch('{"a":1}', '{"a":null}')` → `{}`
+    ///
+    /// **Callers MUST NOT pass `serde_json::Value::Null` as the value** for cross-backend
+    /// portability. Use a sentinel string or omit the key instead.
     pub async fn update_conversation_metadata_field(
         &self,
         id: Uuid,
