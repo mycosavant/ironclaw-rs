@@ -3164,9 +3164,7 @@ struct GatewayStatusResponse {
     model_usage: Option<Vec<ModelUsageEntry>>,
 }
 
-async fn gateway_shutdown_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> impl IntoResponse {
+async fn gateway_shutdown_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     let mut guard = state.shutdown_tx.write().await;
     if let Some(tx) = guard.take() {
         let _ = tx.send(());

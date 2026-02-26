@@ -2,5 +2,10 @@
   "chat.tools.terminal.autoApprove": {
     "cargo clippy": true,
     "cargo install": true
-  }
+  },
+  "workbench.colorTheme": "Experimental Dark",
+  "workbench.iconTheme": "file-icons",
+  "workbench.preferredDarkColorTheme": "Experimental Dark",
+  "window.autoDetectColorScheme": false,
+  "editor.semanticHighlighting.enabled": true
 }

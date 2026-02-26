@@ -58,7 +58,8 @@ async fn send(
 
     let base_url = resolve_gateway_url(gateway)?;
     let auth_token = resolve_token(token)?;
-    let user_id = user.or_else(|| std::env::var("GATEWAY_USER_ID").ok())
+    let user_id = user
+        .or_else(|| std::env::var("GATEWAY_USER_ID").ok())
         .unwrap_or_else(|| "default".to_string());
 
     let client = reqwest::Client::new();
@@ -90,7 +91,8 @@ async fn send(
     }
 
     let resp_json: serde_json::Value = response.json().await?;
-    let msg_id = resp_json.get("message_id")
+    let msg_id = resp_json
+        .get("message_id")
         .and_then(|v| v.as_str())
         .unwrap_or("(unknown)");
 
@@ -132,7 +134,9 @@ async fn wait_for_response(
             continue;
         }
 
-        let Ok(json) = resp.json::<serde_json::Value>().await else { continue };
+        let Ok(json) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
 
         // The history response is {"messages": [...]}; latest assistant message
         if let Some(messages) = json.get("messages").and_then(|v| v.as_array()) {
@@ -180,8 +184,6 @@ fn resolve_token(override_token: Option<String>) -> anyhow::Result<String> {
     }
 
     std::env::var("GATEWAY_AUTH_TOKEN").map_err(|_| {
-        anyhow::anyhow!(
-            "No auth token provided. Set GATEWAY_AUTH_TOKEN or pass --token."
-        )
+        anyhow::anyhow!("No auth token provided. Set GATEWAY_AUTH_TOKEN or pass --token.")
     })
 }

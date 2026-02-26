@@ -87,7 +87,11 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
             level,
             follow,
         } => logs(gateway, token, level, follow).await,
-        GatewayCommand::Stop { gateway, token, yes } => stop(gateway, token, yes).await,
+        GatewayCommand::Stop {
+            gateway,
+            token,
+            yes,
+        } => stop(gateway, token, yes).await,
         GatewayCommand::Start { gateway } => start(gateway).await,
     }
 }
@@ -114,10 +118,7 @@ async fn status(gateway: Option<String>, token: Option<String>) -> anyhow::Resul
         })?;
 
     if !health.status().is_success() {
-        anyhow::bail!(
-            "Gateway health check failed (HTTP {})",
-            health.status()
-        );
+        anyhow::bail!("Gateway health check failed (HTTP {})", health.status());
     }
 
     println!("Gateway: {}", base_url);
@@ -138,7 +139,10 @@ async fn status(gateway: Option<String>, token: Option<String>) -> anyhow::Resul
                 print_gateway_status(&json);
             }
             Ok(r) => {
-                eprintln!("Note: status endpoint returned {} (token may be wrong)", r.status());
+                eprintln!(
+                    "Note: status endpoint returned {} (token may be wrong)",
+                    r.status()
+                );
             }
             Err(e) => {
                 eprintln!("Note: could not fetch detailed status: {}", e);
@@ -152,13 +156,28 @@ async fn status(gateway: Option<String>, token: Option<String>) -> anyhow::Resul
 }
 
 fn print_gateway_status(json: &serde_json::Value) {
-    let uptime = json.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
-    let total = json.get("total_connections").and_then(|v| v.as_u64()).unwrap_or(0);
-    let sse = json.get("sse_connections").and_then(|v| v.as_u64()).unwrap_or(0);
-    let ws = json.get("ws_connections").and_then(|v| v.as_u64()).unwrap_or(0);
+    let uptime = json
+        .get("uptime_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total = json
+        .get("total_connections")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let sse = json
+        .get("sse_connections")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ws = json
+        .get("ws_connections")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     println!("Uptime:  {}", format_duration(uptime));
-    println!("Connections: {} total ({} SSE, {} WebSocket)", total, sse, ws);
+    println!(
+        "Connections: {} total ({} SSE, {} WebSocket)",
+        total, sse, ws
+    );
 
     if let Some(cost) = json.get("daily_cost").and_then(|v| v.as_str()) {
         println!("Daily cost: ${}", cost);
@@ -202,7 +221,11 @@ async fn logs(
         .timeout(Duration::from_secs(if follow { 0 } else { 90 })) // 0 = no timeout when following
         .build()?;
 
-    println!("Streaming logs from {} (level ≥ {}) …", base_url, level.to_uppercase());
+    println!(
+        "Streaming logs from {} (level ≥ {}) …",
+        base_url,
+        level.to_uppercase()
+    );
     println!("Press Ctrl-C to stop.\n");
 
     let mut resp = client
@@ -316,19 +339,12 @@ fn print_log_event(event: &serde_json::Value) {
     }
 }
 
-async fn stop(
-    gateway: Option<String>,
-    token: Option<String>,
-    yes: bool,
-) -> anyhow::Result<()> {
+async fn stop(gateway: Option<String>, token: Option<String>, yes: bool) -> anyhow::Result<()> {
     let base_url = resolve_gateway_url(gateway)?;
     let auth_token = resolve_token(token)?;
 
     if !yes {
-        print!(
-            "Stop the IronClaw gateway at {}? [y/N]: ",
-            base_url
-        );
+        print!("Stop the IronClaw gateway at {}? [y/N]: ", base_url);
         use std::io::Write as _;
         std::io::stdout().flush()?;
 
@@ -375,11 +391,7 @@ async fn start(gateway: Option<String>) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(5))
         .build()?;
 
-    match client
-        .get(format!("{}/api/health", base_url))
-        .send()
-        .await
-    {
+    match client.get(format!("{}/api/health", base_url)).send().await {
         Ok(r) if r.status().is_success() => {
             println!("Gateway is already running at {}", base_url);
             println!("Use `ironclaw gateway status` for details.");
