@@ -229,6 +229,19 @@ pub enum SafetyError {
 
     #[error("Policy violation: {rule}")]
     PolicyViolation { rule: String },
+
+    /// Injection circuit breaker tripped: accumulated high-severity injection
+    /// detections reached the configured threshold.  The job is aborted to
+    /// prevent further processing of potentially poisoned tool output.
+    #[error(
+        "Injection circuit breaker tripped after {count} detection(s) \
+         (threshold: {threshold}) for job {job_id}"
+    )]
+    CircuitBreakerTripped {
+        job_id: Uuid,
+        count: u32,
+        threshold: u32,
+    },
 }
 
 /// Job-related errors.

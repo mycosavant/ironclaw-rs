@@ -448,7 +448,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Exec approvals                     | ✅       | ✅       | TUI overlay                                                                                       |
 | TLS 1.3 minimum                    | ✅       | ✅       | reqwest rustls                                                                                    |
 | SSRF protection                    | ✅       | ✅       | WASM allowlist                                                                                    |
-| SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                     |
+| SSRF IPv6 transition bypass block  | ✅       | ✅       | IPv4-mapped IPv6 (::ffff:0:0/96), CGNAT, benchmark ranges blocked in http.rs                      |
 | Cron webhook SSRF guard            | ✅       | ✅       | dispatch_client_for_target in hooks/bundled.rs (DNS resolve + IP blocklist)                       |
 | Loopback-first                     | ✅       | 🚧       | HTTP binds 0.0.0.0                                                                                |
 | Docker sandbox                     | ✅       | ✅       | Orchestrator/worker containers                                                                    |
@@ -466,7 +466,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skill download path restriction    | ✅       | ❌       | Prevent arbitrary write targets                                                                   |
 | Webhook signature verification     | ✅       | ✅       |                                                                                                   |
 | Media URL validation               | ✅       | ❌       |                                                                                                   |
-| Prompt injection defense           | ✅       | ✅       | Pattern detection, sanitization                                                                   |
+| Prompt injection defense           | ✅       | ✅       | Pattern detection, sanitization, injection circuit breaker (trips job at ≥5 high-severity detections) |
 | Leak detection                     | ✅       | ✅       | Secret exfiltration                                                                               |
 | Dangerous tool re-enable warning   | ✅       | ❌       | Warn when gateway.tools.allow re-enables HTTP tools                                               |
 

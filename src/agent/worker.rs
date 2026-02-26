@@ -16,7 +16,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
-use crate::safety::SafetyLayer;
+use crate::safety::{InjectionCircuitBreaker, SafetyLayer};
 use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
 
@@ -40,6 +40,11 @@ pub struct WorkerDeps {
 pub struct Worker {
     job_id: Uuid,
     deps: WorkerDeps,
+    /// Per-job prompt injection circuit breaker.
+    ///
+    /// Trips when the number of high- or critical-severity injection warnings
+    /// from tool output reaches the threshold, halting further tool execution.
+    injection_breaker: InjectionCircuitBreaker,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -50,7 +55,11 @@ struct ToolExecResult {
 impl Worker {
     /// Create a new worker for a specific job.
     pub fn new(job_id: Uuid, deps: WorkerDeps) -> Self {
-        Self { job_id, deps }
+        Self {
+            job_id,
+            deps,
+            injection_breaker: InjectionCircuitBreaker::default_threshold(),
+        }
     }
 
     // Convenience accessors to avoid deps.field everywhere
@@ -730,6 +739,27 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 let sanitized = self
                     .safety()
                     .sanitize_tool_output(&selection.tool_name, &output);
+
+                // Feed injection warnings into the per-job circuit breaker.
+                // If the breaker trips (≥ threshold high-severity detections),
+                // halt further tool execution to prevent the job from continuing
+                // to process data that may be poisoned by prompt injection.
+                self.injection_breaker.record_warnings(&sanitized.warnings);
+                if self.injection_breaker.is_tripped() {
+                    tracing::warn!(
+                        job_id = %self.job_id,
+                        tool = %selection.tool_name,
+                        count = self.injection_breaker.count(),
+                        threshold = self.injection_breaker.threshold(),
+                        "Injection circuit breaker tripped — aborting job"
+                    );
+                    return Err(crate::error::SafetyError::CircuitBreakerTripped {
+                        job_id: self.job_id,
+                        count: self.injection_breaker.count(),
+                        threshold: self.injection_breaker.threshold(),
+                    }
+                    .into());
+                }
 
                 // Add to context
                 let wrapped = self.safety().wrap_for_llm(
