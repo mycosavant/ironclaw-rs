@@ -32,53 +32,171 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Core ──────────────────────────────────────────────────────────────────
 
     println!("── Core ─────────────────────────────────────────────────────────");
-    check("Session / auth",    check_auth().await,            &mut passed, &mut warned, &mut failed);
-    check("Database",          check_database().await,        &mut passed, &mut warned, &mut failed);
-    check("Workspace dir",     check_workspace_dir(),         &mut passed, &mut warned, &mut failed);
-    check("Secrets key",       check_secrets_key(),           &mut passed, &mut warned, &mut failed);
+    check(
+        "Session / auth",
+        check_auth().await,
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Database",
+        check_database().await,
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Workspace dir",
+        check_workspace_dir(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Secrets key",
+        check_secrets_key(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── LLM ───────────────────────────────────────────────────────────────────
 
     println!("\n── LLM ──────────────────────────────────────────────────────────");
-    check("LLM backend",       check_llm_backend(),           &mut passed, &mut warned, &mut failed);
-    check("LLM API reachable", check_llm_reachable().await,   &mut passed, &mut warned, &mut failed);
-    check("Embeddings",        check_embeddings(),            &mut passed, &mut warned, &mut failed);
+    check(
+        "LLM backend",
+        check_llm_backend(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "LLM API reachable",
+        check_llm_reachable().await,
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Embeddings",
+        check_embeddings(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── Sandbox ───────────────────────────────────────────────────────────────
 
     println!("\n── Sandbox ──────────────────────────────────────────────────────");
-    check("Docker daemon",     check_docker_daemon(),         &mut passed, &mut warned, &mut failed);
-    check("Sandbox image",     check_sandbox_image(),         &mut passed, &mut warned, &mut failed);
-    check("Sandbox enabled",   check_sandbox_config(),        &mut passed, &mut warned, &mut failed);
+    check(
+        "Docker daemon",
+        check_docker_daemon(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Sandbox image",
+        check_sandbox_image(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Sandbox enabled",
+        check_sandbox_config(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── Gateway ───────────────────────────────────────────────────────────────
 
     println!("\n── Gateway ──────────────────────────────────────────────────────");
-    check("Gateway health",    check_gateway_health().await,  &mut passed, &mut warned, &mut failed);
-    check("Gateway auth",      check_gateway_auth(),          &mut passed, &mut warned, &mut failed);
+    check(
+        "Gateway health",
+        check_gateway_health().await,
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Gateway auth",
+        check_gateway_auth(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── Extensions ────────────────────────────────────────────────────────────
 
     println!("\n── Extensions ───────────────────────────────────────────────────");
-    check("WASM tools",        check_wasm_tools(),            &mut passed, &mut warned, &mut failed);
-    check("WASM channels",     check_wasm_channels(),         &mut passed, &mut warned, &mut failed);
-    check("Skills",            check_skills(),                &mut passed, &mut warned, &mut failed);
+    check(
+        "WASM tools",
+        check_wasm_tools(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "WASM channels",
+        check_wasm_channels(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "Skills",
+        check_skills(),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── Binaries ──────────────────────────────────────────────────────────────
 
     println!("\n── Optional binaries ────────────────────────────────────────────");
-    check("docker",            check_binary("docker",        &["--version"]), &mut passed, &mut warned, &mut failed);
-    check("cloudflared",       check_binary("cloudflared",   &["--version"]), &mut passed, &mut warned, &mut failed);
-    check("ngrok",             check_binary("ngrok",         &["version"]),   &mut passed, &mut warned, &mut failed);
-    check("tailscale",         check_binary("tailscale",     &["version"]),   &mut passed, &mut warned, &mut failed);
+    check(
+        "docker",
+        check_binary("docker", &["--version"]),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "cloudflared",
+        check_binary("cloudflared", &["--version"]),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "ngrok",
+        check_binary("ngrok", &["version"]),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
+    check(
+        "tailscale",
+        check_binary("tailscale", &["version"]),
+        &mut passed,
+        &mut warned,
+        &mut failed,
+    );
 
     // ── Summary ───────────────────────────────────────────────────────────────
 
     println!();
     println!("─────────────────────────────────────────────────────────────────");
     print!("  {} passed", passed);
-    if warned > 0 { print!(", {} warning(s)", warned); }
-    if failed > 0 { print!(", {} failed", failed); }
+    if warned > 0 {
+        print!(", {} warning(s)", warned);
+    }
+    if failed > 0 {
+        print!(", {} failed", failed);
+    }
     println!();
 
     if failed > 0 {
@@ -96,13 +214,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
 // ── Check runner ─────────────────────────────────────────────────────────────
 
-fn check(
-    name: &str,
-    result: CheckResult,
-    passed: &mut u32,
-    warned: &mut u32,
-    failed: &mut u32,
-) {
+fn check(name: &str, result: CheckResult, passed: &mut u32, warned: &mut u32, failed: &mut u32) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
@@ -159,8 +271,7 @@ async fn check_auth() -> CheckResult {
 }
 
 async fn check_database() -> CheckResult {
-    let backend = std::env::var("DATABASE_BACKEND")
-        .unwrap_or_else(|_| "postgres".into());
+    let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".into());
 
     match backend.as_str() {
         "libsql" | "turso" | "sqlite" => {
@@ -213,7 +324,8 @@ fn check_secrets_key() -> CheckResult {
         // Keychain may be configured — we cannot probe it without triggering
         // macOS unlock dialogs, so warn instead of failing.
         CheckResult::Warn(
-            "SECRETS_MASTER_KEY not set (keychain may be configured — run `ironclaw onboard`)".into(),
+            "SECRETS_MASTER_KEY not set (keychain may be configured — run `ironclaw onboard`)"
+                .into(),
         )
     }
 }
@@ -223,19 +335,17 @@ fn check_secrets_key() -> CheckResult {
 fn check_llm_backend() -> CheckResult {
     let backend = std::env::var("LLM_BACKEND").unwrap_or_else(|_| "nearai".into());
     let model = match backend.as_str() {
-        "nearai" => std::env::var("NEARAI_MODEL")
-            .unwrap_or_else(|_| "claude-3-5-sonnet-20241022".into()),
+        "nearai" => {
+            std::env::var("NEARAI_MODEL").unwrap_or_else(|_| "claude-3-5-sonnet-20241022".into())
+        }
         "openai" | "openai_compatible" => {
             std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4".into())
         }
         "anthropic" => {
-            std::env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "claude-3-5-sonnet-20241022".into())
+            std::env::var("LLM_MODEL").unwrap_or_else(|_| "claude-3-5-sonnet-20241022".into())
         }
         "ollama" => std::env::var("LLM_MODEL").unwrap_or_else(|_| "llama3".into()),
-        "tinfoil" => {
-            std::env::var("TINFOIL_MODEL").unwrap_or_else(|_| "kimi-k2-5".into())
-        }
+        "tinfoil" => std::env::var("TINFOIL_MODEL").unwrap_or_else(|_| "kimi-k2-5".into()),
         _ => std::env::var("LLM_MODEL").unwrap_or_else(|_| "(unknown)".into()),
     };
     CheckResult::Pass(format!("backend={backend}, model={model}"))
@@ -256,12 +366,13 @@ async fn check_llm_reachable() -> CheckResult {
         }
         "openai" => "https://api.openai.com".into(),
         "anthropic" => "https://api.anthropic.com".into(),
-        "ollama" => std::env::var("OLLAMA_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434".into()),
+        "ollama" => {
+            std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".into())
+        }
         "openai_compatible" => match std::env::var("LLM_BASE_URL") {
             Ok(url) => url,
             Err(_) => {
-                return CheckResult::Fail("LLM_BASE_URL not set for openai_compatible".into())
+                return CheckResult::Fail("LLM_BASE_URL not set for openai_compatible".into());
             }
         },
         "tinfoil" => "https://inference.tinfoil.sh".into(),
@@ -296,10 +407,9 @@ fn check_embeddings() -> CheckResult {
     let enabled = std::env::var("EMBEDDING_ENABLED")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    let provider = std::env::var("EMBEDDING_PROVIDER")
-        .unwrap_or_else(|_| "openai".into());
-    let model = std::env::var("EMBEDDING_MODEL")
-        .unwrap_or_else(|_| "text-embedding-3-small".into());
+    let provider = std::env::var("EMBEDDING_PROVIDER").unwrap_or_else(|_| "openai".into());
+    let model =
+        std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".into());
 
     if has_openai || enabled {
         CheckResult::Pass(format!("provider={provider}, model={model}"))
@@ -332,15 +442,16 @@ fn check_docker_daemon() -> CheckResult {
             } else {
                 ""
             };
-            CheckResult::Warn(format!("Docker daemon not available{hint}; sandbox disabled"))
+            CheckResult::Warn(format!(
+                "Docker daemon not available{hint}; sandbox disabled"
+            ))
         }
         Err(_) => CheckResult::Skip("docker not found in PATH; sandbox disabled".into()),
     }
 }
 
 fn check_sandbox_image() -> CheckResult {
-    let image = std::env::var("SANDBOX_IMAGE")
-        .unwrap_or_else(|_| "ironclaw-worker:latest".into());
+    let image = std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| "ironclaw-worker:latest".into());
 
     match std::process::Command::new("docker")
         .args(["image", "inspect", &image, "--format", "{{.Id}}"])
@@ -365,8 +476,8 @@ fn check_sandbox_config() -> CheckResult {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
     if enabled {
-        let policy = std::env::var("SANDBOX_DEFAULT_POLICY")
-            .unwrap_or_else(|_| "workspace_write".into());
+        let policy =
+            std::env::var("SANDBOX_DEFAULT_POLICY").unwrap_or_else(|_| "workspace_write".into());
         CheckResult::Pass(format!("enabled (policy: {policy})"))
     } else {
         CheckResult::Warn("SANDBOX_ENABLED=false — commands run directly on host".into())
@@ -440,9 +551,15 @@ fn check_wasm_tools() -> CheckResult {
     }
     let count = count_wasm_files(&tools_dir);
     if count == 0 {
-        CheckResult::Pass(format!("directory exists, 0 tools installed ({})", tools_dir.display()))
+        CheckResult::Pass(format!(
+            "directory exists, 0 tools installed ({})",
+            tools_dir.display()
+        ))
     } else {
-        CheckResult::Pass(format!("{count} tool(s) installed ({})", tools_dir.display()))
+        CheckResult::Pass(format!(
+            "{count} tool(s) installed ({})",
+            tools_dir.display()
+        ))
     }
 }
 
@@ -459,9 +576,15 @@ fn check_wasm_channels() -> CheckResult {
     }
     let count = count_wasm_files(&channels_dir);
     if count == 0 {
-        CheckResult::Pass(format!("directory exists, 0 channels installed ({})", channels_dir.display()))
+        CheckResult::Pass(format!(
+            "directory exists, 0 channels installed ({})",
+            channels_dir.display()
+        ))
     } else {
-        CheckResult::Pass(format!("{count} channel(s) installed ({})", channels_dir.display()))
+        CheckResult::Pass(format!(
+            "{count} channel(s) installed ({})",
+            channels_dir.display()
+        ))
     }
 }
 

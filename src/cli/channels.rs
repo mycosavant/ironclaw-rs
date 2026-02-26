@@ -230,8 +230,9 @@ async fn install_channel(
     });
 
     // Copy WASM file
-    println!("Installing '{}' → {}", channel_name, target_wasm.display());    // Validate the source is actually a WASM binary before copying.
-    validate_wasm_magic(&wasm_path).await?;    fs::copy(&wasm_path, &target_wasm)
+    println!("Installing '{}' → {}", channel_name, target_wasm.display()); // Validate the source is actually a WASM binary before copying.
+    validate_wasm_magic(&wasm_path).await?;
+    fs::copy(&wasm_path, &target_wasm)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to copy WASM file: {}", e))?;
 
