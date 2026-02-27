@@ -67,10 +67,14 @@ pub type PromptQueue = Arc<
 
 /// One-time SSE authentication ticket store.
 ///
-/// Maps 64-char hex ticket → creation `Instant`. Tickets expire after 60 seconds
-/// and are consumed on first use so they cannot be replayed.
-pub type SseTicketStore =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>;
+/// Maps 64-char hex ticket → (creation `Instant`, issuer's `Role`).
+/// Tickets expire after 60 seconds, are consumed on first use, and
+/// preserve the issuing caller's role to prevent privilege escalation.
+pub type SseTicketStore = Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, crate::channels::web::rbac::Role)>,
+    >,
+>;
 
 /// TTL for SSE one-time tickets.
 pub const SSE_TICKET_TTL_SECS: u64 = 60;
@@ -530,7 +534,10 @@ async fn health_handler(State(state): State<Arc<GatewayState>>) -> Json<HealthRe
 /// It can be used exactly once as `?ticket=<hex>` on the chat events SSE
 /// endpoint, allowing `EventSource` (which cannot set headers) to authenticate
 /// without embedding the long-lived bearer token in a URL.
-async fn sse_ticket_handler(State(state): State<Arc<GatewayState>>) -> Json<SseTicketResponse> {
+async fn sse_ticket_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+) -> Json<SseTicketResponse> {
     use rand::RngCore as _;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -540,11 +547,13 @@ async fn sse_ticket_handler(State(state): State<Arc<GatewayState>>) -> Json<SseT
         s
     });
 
+    // Store the ticket with the issuing caller's role so that redemption
+    // preserves the correct privilege level (no escalation via ticket).
     state
         .sse_tickets
         .lock()
         .await
-        .insert(ticket.clone(), std::time::Instant::now());
+        .insert(ticket.clone(), (std::time::Instant::now(), role));
 
     Json(SseTicketResponse {
         ticket,
@@ -610,10 +619,20 @@ async fn session_delete_handler(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
 
-    if session_store::revoke_session(&state.session_store, raw_token).await {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Ok(StatusCode::OK)
+    match session_store::revoke_session(&state.session_store, raw_token, role).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Ok(StatusCode::OK),
+        Err(target_role) => {
+            tracing::warn!(
+                caller_role = %role,
+                target_role = %target_role,
+                "Blocked session revocation: caller role < target session role"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Cannot revoke a session with a higher role".to_string(),
+            ))
+        }
     }
 }
 
@@ -848,8 +867,10 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 }
 
 async fn chat_events_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChat)?;
     let sse = state.sse.subscribe().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
@@ -861,10 +882,12 @@ async fn chat_events_handler(
 }
 
 async fn chat_ws_handler(
+    Extension(role): Extension<Role>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChat)?;
     // Validate Origin header to prevent cross-site WebSocket hijacking.
     // Require the header outright; browsers always send it for WS upgrades,
     // so a missing Origin means a non-browser client trying to bypass the check.
@@ -894,7 +917,9 @@ async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
-    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
+    Ok(ws.on_upgrade(move |socket| {
+        crate::channels::web::ws::handle_ws_connection(socket, state, role)
+    }))
 }
 
 #[derive(Deserialize)]
@@ -905,9 +930,11 @@ struct HistoryQuery {
 }
 
 async fn chat_history_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChat)?;
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
@@ -1059,7 +1086,10 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
             if let Some(next) = iter.peek()
                 && next.role == "assistant"
             {
-                let assistant_msg = iter.next().expect("peeked");
+                // Safety: peek() above confirmed the next element exists.
+                let Some(assistant_msg) = iter.next() else {
+                    break;
+                };
                 turn.response = Some(assistant_msg.content.clone());
                 turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
             }
@@ -1078,8 +1108,10 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
 }
 
 async fn chat_threads_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChat)?;
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
@@ -1235,9 +1267,11 @@ struct TreeQuery {
 }
 
 async fn memory_tree_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewMemory)?;
     let workspace = state.workspace.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
@@ -1283,9 +1317,11 @@ struct ListQuery {
 }
 
 async fn memory_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<MemoryListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewMemory)?;
     let workspace = state.workspace.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
@@ -1319,9 +1355,11 @@ struct ReadQuery {
 }
 
 async fn memory_read_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewMemory)?;
     let workspace = state.workspace.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
@@ -1363,9 +1401,11 @@ async fn memory_write_handler(
 }
 
 async fn memory_search_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<MemorySearchRequest>,
 ) -> Result<Json<MemorySearchResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewMemory)?;
     let workspace = state.workspace.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
@@ -1392,8 +1432,10 @@ async fn memory_search_handler(
 // --- Jobs handlers ---
 
 async fn jobs_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -1433,8 +1475,10 @@ async fn jobs_list_handler(
 }
 
 async fn jobs_summary_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -1456,9 +1500,11 @@ async fn jobs_summary_handler(
 }
 
 async fn jobs_detail_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
@@ -1733,9 +1779,11 @@ async fn jobs_prompt_handler(
 
 /// Load persisted job events for a job (for history replay on page open).
 async fn jobs_events_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Database not available".to_string(),
@@ -1785,10 +1833,12 @@ struct FilePathQuery {
 }
 
 async fn job_files_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -1853,10 +1903,12 @@ async fn job_files_list_handler(
 }
 
 async fn job_files_read_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewJobs)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -1907,8 +1959,10 @@ async fn job_files_read_handler(
 // --- Logs handlers ---
 
 async fn logs_events_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_permission(role, Permission::ViewLogs)?;
     let broadcaster = state.log_broadcaster.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log broadcaster not available".to_string(),
@@ -1944,8 +1998,10 @@ async fn logs_events_handler(
 }
 
 async fn logs_level_get_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewLogs)?;
     let handle = state.log_level_handle.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log level control not available".to_string(),
@@ -1981,8 +2037,10 @@ async fn logs_level_set_handler(
 // --- Extension handlers ---
 
 async fn extensions_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewExtensions)?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
@@ -2011,8 +2069,10 @@ async fn extensions_list_handler(
 }
 
 async fn extensions_tools_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ToolListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewExtensions)?;
     let registry = state.tool_registry.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Tool registry not available".to_string(),
@@ -2216,9 +2276,11 @@ async fn extensions_remove_handler(
 }
 
 async fn extensions_registry_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Query(params): Query<RegistrySearchQuery>,
-) -> Json<RegistrySearchResponse> {
+) -> Result<Json<RegistrySearchResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewExtensions)?;
     let query = params.query.unwrap_or_default();
     let query_lower = query.to_lowercase();
     let tokens: Vec<&str> = query_lower.split_whitespace().collect();
@@ -2274,13 +2336,15 @@ async fn extensions_registry_handler(
         })
         .collect();
 
-    Json(RegistrySearchResponse { entries })
+    Ok(Json(RegistrySearchResponse { entries }))
 }
 
 async fn extensions_setup_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewExtensions)?;
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
@@ -2379,8 +2443,10 @@ async fn pairing_approve_handler(
 // --- Channel health handler ---
 
 async fn channels_health_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-) -> Json<ChannelHealthResponse> {
+) -> Result<Json<ChannelHealthResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChannels)?;
     use crate::channels::ChannelStatus;
 
     let channels = if let Some(ref shared) = state.channel_health {
@@ -2413,14 +2479,16 @@ async fn channels_health_handler(
             .count(),
     };
 
-    Json(ChannelHealthResponse { channels, summary })
+    Ok(Json(ChannelHealthResponse { channels, summary }))
 }
 
 // --- Skills handlers ---
 
 async fn skills_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<super::types::SkillListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewSkills)?;
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
@@ -2451,9 +2519,11 @@ async fn skills_list_handler(
 }
 
 async fn skills_search_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<super::types::SkillSearchRequest>,
 ) -> Result<Json<super::types::SkillSearchResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewSkills)?;
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
@@ -2675,8 +2745,10 @@ async fn skills_remove_handler(
 // --- Routines handlers ---
 
 async fn routines_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewRoutines)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -2693,8 +2765,10 @@ async fn routines_list_handler(
 }
 
 async fn routines_summary_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewRoutines)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -2736,9 +2810,11 @@ async fn routines_summary_handler(
 }
 
 async fn routines_detail_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewRoutines)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -3062,9 +3138,11 @@ async fn routines_delete_handler(
 }
 
 async fn routines_runs_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewRoutines)?;
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -3148,15 +3226,20 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
 // --- Settings handlers ---
 
 async fn settings_list_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+) -> Result<Json<SettingsListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewSettings)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
     let rows = store.list_settings(&state.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to list settings".to_string(),
+        )
     })?;
 
     let settings = rows
@@ -3172,21 +3255,26 @@ async fn settings_list_handler(
 }
 
 async fn settings_get_handler(
+    Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
     Path(key): Path<String>,
-) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+) -> Result<Json<SettingResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewSettings)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
     let row = store
         .get_setting_full(&state.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get setting".to_string(),
+            )
         })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or((StatusCode::NOT_FOUND, "Setting not found".to_string()))?;
 
     Ok(Json(SettingResponse {
         key: row.key,
@@ -3283,7 +3371,8 @@ async fn settings_import_handler(
 async fn gateway_status_handler(
     Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-) -> Json<GatewayStatusResponse> {
+) -> Result<Json<GatewayStatusResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewGatewayStatus)?;
     let sse_connections = state.sse.connection_count();
     let ws_connections = state
         .ws_tracker
@@ -3311,7 +3400,7 @@ async fn gateway_status_handler(
         (None, None, None)
     };
 
-    Json(GatewayStatusResponse {
+    Ok(Json(GatewayStatusResponse {
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -3320,7 +3409,7 @@ async fn gateway_status_handler(
         actions_this_hour,
         model_usage,
         role: role.to_string(),
-    })
+    }))
 }
 
 #[derive(serde::Serialize)]
@@ -3350,33 +3439,21 @@ struct GatewayStatusResponse {
 async fn gateway_shutdown_handler(
     Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-) -> impl IntoResponse {
-    if !role.has_permission(Permission::ShutdownGateway) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "Owner role required to shutdown gateway"
-            })),
-        )
-            .into_response();
-    }
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ShutdownGateway)?;
 
     let mut guard = state.shutdown_tx.write().await;
     if let Some(tx) = guard.take() {
         let _ = tx.send(());
-        Json(serde_json::json!({
+        Ok(Json(serde_json::json!({
             "status": "ok",
             "message": "shutdown initiated"
-        }))
-        .into_response()
+        })))
     } else {
-        (
+        Err((
             StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "shutdown already in progress or not available"
-            })),
-        )
-            .into_response()
+            "Shutdown already in progress or not available".to_string(),
+        ))
     }
 }
 

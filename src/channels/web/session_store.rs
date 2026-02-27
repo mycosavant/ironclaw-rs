@@ -100,7 +100,6 @@ pub async fn create_session(store: &SessionStore, role: Role) -> (String, Uuid) 
 
     let token = generate_token();
     let session_id = Uuid::new_v4();
-    let now = Instant::now();
     map.insert(
         token.clone(),
         GatewaySession {
@@ -134,16 +133,27 @@ pub async fn validate_and_touch(store: &SessionStore, token: &str) -> Option<(Uu
     None
 }
 
-/// Revoke a session by its token.
+/// Revoke a session by its token, if the caller's role is high enough.
 ///
-/// Returns `true` if a session was found and removed.
-pub async fn revoke_session(store: &SessionStore, token: &str) -> bool {
+/// Returns `Ok(true)` if revoked, `Ok(false)` if the token was not found,
+/// or `Err(target_role)` if the target session has a higher role than the caller.
+pub async fn revoke_session(
+    store: &SessionStore,
+    token: &str,
+    caller_role: Role,
+) -> Result<bool, Role> {
     let mut map = store.lock().await;
-    if let Some(s) = map.remove(token) {
-        tracing::info!(session_id = %s.session_id, "Gateway session revoked");
-        true
+    if let Some(session) = map.get(token) {
+        if session.role > caller_role {
+            return Err(session.role);
+        }
+        let session_id = session.session_id;
+        let role = session.role;
+        map.remove(token);
+        tracing::info!(session_id = %session_id, %role, "Gateway session revoked");
+        Ok(true)
     } else {
-        false
+        Ok(false)
     }
 }
 
@@ -172,10 +182,22 @@ mod tests {
     async fn test_revoke_session() {
         let store = new_session_store();
         let (token, _) = create_session(&store, Role::User).await;
-        assert!(revoke_session(&store, &token).await);
+        assert_eq!(revoke_session(&store, &token, Role::Owner).await, Ok(true));
         assert!(validate_and_touch(&store, &token).await.is_none());
         // Double-revoke is a no-op.
-        assert!(!revoke_session(&store, &token).await);
+        assert_eq!(revoke_session(&store, &token, Role::Owner).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_blocked_by_higher_role() {
+        let store = new_session_store();
+        let (token, _) = create_session(&store, Role::Owner).await;
+        // An Admin cannot revoke an Owner session.
+        assert!(revoke_session(&store, &token, Role::Admin).await.is_err());
+        // Session should still be valid.
+        assert!(validate_and_touch(&store, &token).await.is_some());
+        // Owner can revoke their own.
+        assert_eq!(revoke_session(&store, &token, Role::Owner).await, Ok(true));
     }
 
     #[tokio::test]

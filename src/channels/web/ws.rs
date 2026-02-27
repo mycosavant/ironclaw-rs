@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
+use crate::channels::web::rbac::{Permission, Role};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
 
@@ -62,7 +63,7 @@ impl Default for WsConnectionTracker {
 ///
 /// When either task ends (client disconnect or broadcast closed), both are
 /// cleaned up.
-pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
+pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>, role: Role) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Track connection
@@ -124,7 +125,7 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx).await;
+                        handle_client_message(client_msg, &state, &user_id, &direct_tx, role).await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -148,15 +149,42 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     }
 }
 
+/// Check a WebSocket-level permission and send an error frame if denied.
+///
+/// Returns `true` if the caller lacks the required permission (i.e. the
+/// action should be aborted).
+async fn ws_require_permission(
+    role: Role,
+    perm: Permission,
+    direct_tx: &mpsc::Sender<WsServerMessage>,
+) -> bool {
+    if role.has_permission(perm) {
+        return false; // allowed
+    }
+    let _ = direct_tx
+        .send(WsServerMessage::Error {
+            message: format!(
+                "Insufficient permissions: requires {} role",
+                perm.minimum_role()
+            ),
+        })
+        .await;
+    true // denied
+}
+
 /// Route a parsed client message to the appropriate handler.
 async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
     user_id: &str,
     direct_tx: &mpsc::Sender<WsServerMessage>,
+    role: Role,
 ) {
     match msg {
         WsClientMessage::Message { content, thread_id } => {
+            if ws_require_permission(role, Permission::SendMessage, direct_tx).await {
+                return;
+            }
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
@@ -184,6 +212,9 @@ async fn handle_client_message(
             action,
             thread_id,
         } => {
+            if ws_require_permission(role, Permission::ApproveToolCall, direct_tx).await {
+                return;
+            }
             let (approved, always) = match action.as_str() {
                 "approve" => (true, false),
                 "always" => (true, true),
@@ -240,6 +271,9 @@ async fn handle_client_message(
             extension_name,
             token,
         } => {
+            if ws_require_permission(role, Permission::SubmitAuthToken, direct_tx).await {
+                return;
+            }
             if let Some(ref ext_mgr) = state.extension_manager {
                 match ext_mgr.auth(&extension_name, Some(&token)).await {
                     Ok(result) if result.status == "authenticated" => {
@@ -290,6 +324,9 @@ async fn handle_client_message(
             }
         }
         WsClientMessage::AuthCancel { .. } => {
+            if ws_require_permission(role, Permission::SubmitAuthToken, direct_tx).await {
+                return;
+            }
             crate::channels::web::server::clear_auth_mode(state).await;
         }
         WsClientMessage::Ping => {
@@ -332,7 +369,14 @@ mod tests {
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
         let state = make_test_state(None).await;
 
-        handle_client_message(WsClientMessage::Ping, &state, "user1", &direct_tx).await;
+        handle_client_message(
+            WsClientMessage::Ping,
+            &state,
+            "user1",
+            &direct_tx,
+            Role::Viewer,
+        )
+        .await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -353,6 +397,7 @@ mod tests {
             &state,
             "user1",
             &direct_tx,
+            Role::User,
         )
         .await;
 
@@ -377,6 +422,7 @@ mod tests {
             &state,
             "user1",
             &direct_tx,
+            Role::User,
         )
         .await;
 
@@ -405,6 +451,7 @@ mod tests {
             &state,
             "user1",
             &direct_tx,
+            Role::User,
         )
         .await;
 
@@ -429,6 +476,7 @@ mod tests {
             &state,
             "user1",
             &direct_tx,
+            Role::User,
         )
         .await;
 
@@ -455,6 +503,7 @@ mod tests {
             &state,
             "user1",
             &direct_tx,
+            Role::User,
         )
         .await;
 
@@ -464,6 +513,63 @@ mod tests {
                 assert!(message.contains("Invalid request_id"));
             }
             _ => panic!("Expected Error variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_viewer_cannot_send_message() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+
+        handle_client_message(
+            WsClientMessage::Message {
+                content: "should be denied".to_string(),
+                thread_id: None,
+            },
+            &state,
+            "user1",
+            &direct_tx,
+            Role::Viewer,
+        )
+        .await;
+
+        // Should get a permission error, not be forwarded
+        let response = direct_rx.recv().await.unwrap();
+        match response {
+            WsServerMessage::Error { message } => {
+                assert!(message.contains("Insufficient permissions"));
+            }
+            _ => panic!("Expected Error variant for Viewer sending message"),
+        }
+        // Agent should NOT have received the message
+        assert!(agent_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_viewer_cannot_approve_tool_call() {
+        let state = make_test_state(None).await;
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+
+        handle_client_message(
+            WsClientMessage::Approval {
+                request_id: Uuid::new_v4().to_string(),
+                action: "approve".to_string(),
+                thread_id: None,
+            },
+            &state,
+            "user1",
+            &direct_tx,
+            Role::Viewer,
+        )
+        .await;
+
+        let response = direct_rx.recv().await.unwrap();
+        match response {
+            WsServerMessage::Error { message } => {
+                assert!(message.contains("Insufficient permissions"));
+            }
+            _ => panic!("Expected Error variant for Viewer approving tool call"),
         }
     }
 

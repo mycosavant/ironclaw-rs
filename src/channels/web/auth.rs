@@ -51,8 +51,8 @@ pub async fn auth_middleware(
         && let Ok(user) = value.to_str()
         && !user.is_empty()
     {
-        // Look up the proxy user in the roles map; default to User.
-        let role = auth.roles.get(user).copied().unwrap_or(Role::User);
+        // Look up the proxy user in the roles map; default to Viewer (least privilege).
+        let role = auth.roles.get(user).copied().unwrap_or(Role::Viewer);
         request.extensions_mut().insert(role);
         return next.run(request).await;
     }
@@ -76,7 +76,9 @@ pub async fn auth_middleware(
 
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
-            // Fall back to query parameter for SSE EventSource (constant-time comparison).
+            // Fall back to query parameter for SSE EventSource.
+            // Master token comparison uses constant-time equality; session token
+            // lookup is a hash-map get (safe because tokens are 64-char random hex).
             // Percent-decode the raw value before comparing so tokens containing '+', '=',
             // or other special characters work correctly when the browser encodes the URL.
             if let Some(raw) = pair.strip_prefix("token=") {
@@ -96,17 +98,17 @@ pub async fn auth_middleware(
             }
 
             // One-time SSE ticket: consumed on first use, expires after TTL.
-            // SSE tickets inherit User role by default.
+            // Tickets inherit the role of the caller who issued them.
             if let Some(ticket_raw) = pair.strip_prefix("ticket=") {
                 let ticket = urlencoding::decode(ticket_raw)
                     .unwrap_or(std::borrow::Cow::Borrowed(ticket_raw));
                 let mut map = auth.sse_tickets.lock().await;
-                if let Some(created_at) = map.get(ticket.as_ref()).copied() {
+                if let Some((created_at, ticket_role)) = map.get(ticket.as_ref()).copied() {
                     if created_at.elapsed().as_secs() < SSE_TICKET_TTL_SECS {
                         // Consume the ticket (one-time use) and allow the request.
                         map.remove(ticket.as_ref());
                         drop(map);
-                        request.extensions_mut().insert(Role::User);
+                        request.extensions_mut().insert(ticket_role);
                         return next.run(request).await;
                     }
                     // Expired — remove it and fall through to reject.

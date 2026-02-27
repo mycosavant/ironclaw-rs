@@ -130,27 +130,29 @@ mod tests {
 
     use super::*;
 
+    // These tests must run serially because they modify env vars.
+    // Use `serial_test` or combine them into one test.
     #[test]
-    fn test_defaults_without_env() {
+    fn test_defaults_and_env_overrides() {
+        // Part 1: Ensure env vars are clean, then check defaults.
+        unsafe {
+            std::env::remove_var("AGENT_BUS_CAPACITY");
+            std::env::remove_var("AGENT_MAX_CHILD_AGENTS");
+        }
         let settings = Settings::default();
         let config = AgentConfig::resolve(&settings).unwrap();
         assert_eq!(config.agent_bus_capacity, 256);
         assert_eq!(config.max_child_agents, 5);
-    }
 
-    #[test]
-    fn test_env_overrides() {
-        // SAFETY: tests run single-threaded via cargo test default,
-        // and these env vars are not read by other tests concurrently.
+        // Part 2: Set env overrides and verify they take effect.
         unsafe {
             std::env::set_var("AGENT_BUS_CAPACITY", "512");
             std::env::set_var("AGENT_MAX_CHILD_AGENTS", "10");
         }
-
-        let settings = Settings::default();
-        let config = AgentConfig::resolve(&settings).unwrap();
-        assert_eq!(config.agent_bus_capacity, 512);
-        assert_eq!(config.max_child_agents, 10);
+        let settings2 = Settings::default();
+        let config2 = AgentConfig::resolve(&settings2).unwrap();
+        assert_eq!(config2.agent_bus_capacity, 512);
+        assert_eq!(config2.max_child_agents, 10);
 
         // Clean up env vars.
         unsafe {
