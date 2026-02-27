@@ -346,6 +346,21 @@ impl AppBuilder {
         #[cfg(feature = "media")]
         tools.register_vision_tools(Arc::clone(llm));
 
+        #[cfg(feature = "browser")]
+        {
+            match crate::tools::builtin::browser::find_driver_script() {
+                Ok(driver_path) => {
+                    let browser_mgr = Arc::new(
+                        crate::tools::builtin::browser::BrowserSessionManager::new(driver_path),
+                    );
+                    tools.register_browser_tools(browser_mgr);
+                }
+                Err(e) => {
+                    tracing::warn!("Browser tools disabled: {e}");
+                }
+            }
+        }
+
         // Create embeddings provider using the unified method
         let embeddings = self
             .config
