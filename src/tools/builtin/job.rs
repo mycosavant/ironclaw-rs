@@ -2123,8 +2123,7 @@ mod tests {
         async fn complete(
             &self,
             _request: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError>
-        {
+        ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
             Ok(crate::llm::CompletionResponse {
                 content: "done".to_string(),
                 input_tokens: 1,
@@ -2136,8 +2135,7 @@ mod tests {
         async fn complete_with_tools(
             &self,
             _request: crate::llm::ToolCompletionRequest,
-        ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError>
-        {
+        ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
             Ok(crate::llm::ToolCompletionResponse {
                 content: Some("done".to_string()),
                 tool_calls: vec![],

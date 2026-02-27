@@ -1128,7 +1128,10 @@ mod tests {
         assert!(result.contains("[truncated at"), "should be truncated");
         // The result must be valid UTF-8 (Rust guarantees this via &str slicing)
         // and the emoji must be intact (not split).
-        assert!(result.contains('\u{1F600}'), "emoji should be preserved intact");
+        assert!(
+            result.contains('\u{1F600}'),
+            "emoji should be preserved intact"
+        );
 
         // Also test that a string just barely over the limit gets truncated
         // without the emoji (emoji starts at MAX_OUTPUT_SIZE, excluded by take_while).

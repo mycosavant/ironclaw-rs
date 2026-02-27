@@ -209,7 +209,7 @@ impl Scheduler {
             let start_tx = tx.clone();
             jobs.insert(job_id, ScheduledJob { handle, tx });
             start_tx
-        };  // write lock released here
+        }; // write lock released here
 
         // Start the worker outside the write lock to avoid holding it across an await.
         if start_tx.send(WorkerMessage::Start).await.is_err() {
