@@ -22,7 +22,34 @@ use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
 use crate::channels::web::rbac::{Permission, Role};
 use crate::channels::web::server::GatewayState;
+use crate::channels::web::session_store::{self, SessionStore};
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
+
+/// Authentication handle for a WebSocket connection.
+///
+/// Encapsulates re-validation of the caller's session on each message.
+/// Master-token connections always return the fixed Owner role. Session-token
+/// connections re-validate against the session store and detect revocations.
+#[derive(Clone)]
+pub enum WsAuthHandle {
+    /// Authenticated with the master bearer token — always Owner, never expires.
+    MasterToken,
+    /// Authenticated with a session token — must be re-validated periodically.
+    Session { token: String, store: SessionStore },
+}
+
+impl WsAuthHandle {
+    /// Re-validate and return the current role, or `None` if the session has
+    /// been revoked or expired.
+    pub async fn validate(&self) -> Option<Role> {
+        match self {
+            Self::MasterToken => Some(Role::Owner),
+            Self::Session { token, store } => session_store::validate_and_touch(store, token)
+                .await
+                .map(|(_, role)| role),
+        }
+    }
+}
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -63,7 +90,15 @@ impl Default for WsConnectionTracker {
 ///
 /// When either task ends (client disconnect or broadcast closed), both are
 /// cleaned up.
-pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>, role: Role) {
+///
+/// Session re-validation: each incoming client message re-validates the session
+/// via `auth_handle`. If the session has been revoked, the connection is closed
+/// with an error frame.
+pub async fn handle_ws_connection(
+    socket: WebSocket,
+    state: Arc<GatewayState>,
+    auth_handle: WsAuthHandle,
+) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Track connection
@@ -117,15 +152,36 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>, r
         }
     });
 
-    // Receiver task: read client frames and route to agent
+    // Receiver task: read client frames and route to agent.
+    // Each message re-validates the session to detect revocation.
     let user_id = state.user_id.clone();
     while let Some(Ok(frame)) = ws_stream.next().await {
         match frame {
             Message::Text(text) => {
+                // Re-validate session before processing.
+                let current_role = match auth_handle.validate().await {
+                    Some(r) => r,
+                    None => {
+                        let _ = direct_tx
+                            .send(WsServerMessage::Error {
+                                message: "Session expired or revoked".to_string(),
+                            })
+                            .await;
+                        break; // Close the connection
+                    }
+                };
+
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx, role).await;
+                        handle_client_message(
+                            client_msg,
+                            &state,
+                            &user_id,
+                            &direct_tx,
+                            current_role,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -571,6 +627,44 @@ mod tests {
             }
             _ => panic!("Expected Error variant for Viewer approving tool call"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_ws_auth_handle_master_always_valid() {
+        let handle = WsAuthHandle::MasterToken;
+        assert_eq!(handle.validate().await, Some(Role::Owner));
+    }
+
+    #[tokio::test]
+    async fn test_ws_auth_handle_session_valid() {
+        let store = session_store::new_session_store();
+        let (token, _) = session_store::create_session(&store, Role::User).await;
+        let handle = WsAuthHandle::Session {
+            token,
+            store: store.clone(),
+        };
+        assert_eq!(handle.validate().await, Some(Role::User));
+    }
+
+    #[tokio::test]
+    async fn test_ws_auth_handle_session_revoked() {
+        let store = session_store::new_session_store();
+        let (token, _) = session_store::create_session(&store, Role::Admin).await;
+        let handle = WsAuthHandle::Session {
+            token: token.clone(),
+            store: store.clone(),
+        };
+
+        // Valid before revocation.
+        assert_eq!(handle.validate().await, Some(Role::Admin));
+
+        // Revoke the session.
+        session_store::revoke_session(&store, &token, Role::Owner)
+            .await
+            .unwrap();
+
+        // Now validation returns None.
+        assert_eq!(handle.validate().await, None);
     }
 
     /// Helper to create a GatewayState for testing.

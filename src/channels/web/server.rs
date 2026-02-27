@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode, header},
     middleware,
     response::{
@@ -264,6 +264,10 @@ pub async fn start_server(
         .route(
             "/api/auth/session",
             axum::routing::delete(session_delete_handler),
+        )
+        .route(
+            "/api/auth/sessions/{session_id}",
+            axum::routing::delete(session_revoke_handler),
         )
         .route("/api/auth/sessions", get(session_list_handler))
         // Chat
@@ -606,6 +610,13 @@ async fn session_create_handler(
 /// Revokes the session whose token is in the `Authorization: Bearer` header.
 /// If the master bearer token is presented instead of a session token this is
 /// a no-op (the master token cannot be revoked via this endpoint).
+///
+/// Note: Because the token being revoked is the same token that authenticated
+/// the caller, the role-based check in `revoke_session` (which prevents
+/// lower-role callers from revoking higher-role sessions) is effectively
+/// defense-in-depth here — it can never fail for self-revocation. The check
+/// becomes meaningful if this endpoint is extended to accept a target session
+/// ID for cross-session revocation.
 async fn session_delete_handler(
     Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
@@ -627,6 +638,40 @@ async fn session_delete_handler(
                 caller_role = %role,
                 target_role = %target_role,
                 "Blocked session revocation: caller role < target session role"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Cannot revoke a session with a higher role".to_string(),
+            ))
+        }
+    }
+}
+
+/// `DELETE /api/auth/sessions/{session_id}`
+///
+/// Revokes a specific session by its UUID. The caller must have `ManageSessions`
+/// permission and their role must be >= the target session's role (no privilege
+/// escalation). Returns 204 on success, 403 if the target has a higher role,
+/// 404 if the session ID is not found.
+async fn session_revoke_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id_str): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_permission(role, Permission::ManageSessions)?;
+
+    let session_id = Uuid::parse_str(&session_id_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid session ID".to_string()))?;
+
+    match session_store::revoke_session_by_id(&state.session_store, session_id, role).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
+        Err(target_role) => {
+            tracing::warn!(
+                caller_role = %role,
+                target_role = %target_role,
+                target_session = %session_id,
+                "Blocked cross-session revocation: caller role < target session role"
             );
             Err((
                 StatusCode::FORBIDDEN,
@@ -886,6 +931,7 @@ async fn chat_ws_handler(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
+    request: Request,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_permission(role, Permission::ViewChat)?;
     // Validate Origin header to prevent cross-site WebSocket hijacking.
@@ -917,8 +963,50 @@ async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+
+    // Build an auth handle for per-message session re-validation.
+    // Extract the bearer token from the Authorization header or ?token= query param.
+    let auth_handle = {
+        use crate::channels::web::ws::WsAuthHandle;
+
+        let bearer = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(String::from)
+            .or_else(|| {
+                request
+                    .uri()
+                    .query()
+                    .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+                    .map(|raw| {
+                        urlencoding::decode(raw)
+                            .unwrap_or(std::borrow::Cow::Borrowed(raw))
+                            .into_owned()
+                    })
+            });
+
+        match bearer {
+            Some(token) => {
+                // Check if it's a session token (exists in the store).
+                let is_session = state.session_store.lock().await.contains_key(&token);
+                if is_session {
+                    WsAuthHandle::Session {
+                        token,
+                        store: state.session_store.clone(),
+                    }
+                } else {
+                    // Master token or unknown → treat as permanently authenticated.
+                    WsAuthHandle::MasterToken
+                }
+            }
+            // Authenticated via trusted-proxy header → no session to revoke.
+            None => WsAuthHandle::MasterToken,
+        }
+    };
+
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, role)
+        crate::channels::web::ws::handle_ws_connection(socket, state, auth_handle)
     }))
 }
 
@@ -2829,6 +2917,11 @@ async fn routines_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    // Verify ownership: return 404 (not 403) to avoid leaking existence.
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     let runs = store
         .list_routine_runs(routine_id, 20)
         .await
@@ -2885,6 +2978,11 @@ async fn routines_trigger_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    // Verify ownership: return 404 (not 403) to avoid leaking existence.
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     // Send the routine prompt through the message pipeline as a manual trigger.
     let prompt = match &routine.action {
@@ -3090,6 +3188,11 @@ async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    // Verify ownership: return 404 (not 403) to avoid leaking existence.
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
@@ -3122,6 +3225,17 @@ async fn routines_delete_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
+    // Verify ownership before deleting: return 404 (not 403) to avoid leaking existence.
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     let deleted = store
         .delete_routine(routine_id)
         .await
@@ -3150,6 +3264,17 @@ async fn routines_runs_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    // Verify ownership: return 404 (not 403) to avoid leaking existence.
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let runs = store
         .list_routine_runs(routine_id, 50)

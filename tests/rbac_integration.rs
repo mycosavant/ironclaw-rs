@@ -396,3 +396,165 @@ async fn test_session_list_requires_admin() {
 
     assert_eq!(resp.status(), 403);
 }
+
+#[tokio::test]
+async fn test_viewer_cannot_call_openai_chat() {
+    let (addr, _state) = start_test_server().await;
+
+    let viewer_token = create_session_with_role(addr, AUTH_TOKEN, "viewer")
+        .await
+        .unwrap();
+
+    // Viewer cannot call /v1/chat/completions (requires User / SendMessage)
+    let resp = client()
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", format!("Bearer {}", viewer_token))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Insufficient permissions")
+    );
+}
+
+#[tokio::test]
+async fn test_viewer_can_list_openai_models() {
+    let (addr, _state) = start_test_server().await;
+
+    let viewer_token = create_session_with_role(addr, AUTH_TOKEN, "viewer")
+        .await
+        .unwrap();
+
+    // Viewer CAN call /v1/models (requires Viewer / ViewGatewayStatus).
+    // Will be 503 because LLM provider is not configured, but NOT 403.
+    let resp = client()
+        .get(format!("http://{}/v1/models", addr))
+        .header("Authorization", format!("Bearer {}", viewer_token))
+        .send()
+        .await
+        .unwrap();
+
+    assert_ne!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_user_can_call_openai_chat() {
+    let (addr, _state) = start_test_server().await;
+
+    let user_token = create_session_with_role(addr, AUTH_TOKEN, "user")
+        .await
+        .unwrap();
+
+    // User has SendMessage permission — should not get 403.
+    // Will likely be 503 (LLM not configured), but NOT 403.
+    let resp = client()
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_ne!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_can_revoke_user_session_by_id() {
+    let (addr, _state) = start_test_server().await;
+
+    // Create an Admin session and a User session.
+    let admin_token = create_session_with_role(addr, AUTH_TOKEN, "admin")
+        .await
+        .unwrap();
+    let user_token = create_session_with_role(addr, AUTH_TOKEN, "user")
+        .await
+        .unwrap();
+
+    // Find the User session's ID via the sessions list.
+    let resp = client()
+        .get(format!("http://{}/api/auth/sessions", addr))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+
+    // The User session is the one with role "user".
+    let user_session = sessions
+        .iter()
+        .find(|s| s["role"].as_str() == Some("user"))
+        .unwrap();
+    let session_id = user_session["session_id"].as_str().unwrap();
+
+    // Admin revokes the User session by ID.
+    let resp = client()
+        .delete(format!("http://{}/api/auth/sessions/{}", addr, session_id))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // The User session token should no longer work.
+    let resp = client()
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_admin_cannot_revoke_owner_session_by_id() {
+    let (addr, _state) = start_test_server().await;
+
+    // Create an Admin session and an Owner session.
+    let admin_token = create_session_with_role(addr, AUTH_TOKEN, "admin")
+        .await
+        .unwrap();
+    let _owner_token = create_session_with_role(addr, AUTH_TOKEN, "owner")
+        .await
+        .unwrap();
+
+    // Find the Owner session's ID.
+    let resp = client()
+        .get(format!("http://{}/api/auth/sessions", addr))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+
+    let owner_session = sessions
+        .iter()
+        .find(|s| s["role"].as_str() == Some("owner"))
+        .unwrap();
+    let session_id = owner_session["session_id"].as_str().unwrap();
+
+    // Admin tries to revoke Owner session → 403.
+    let resp = client()
+        .delete(format!("http://{}/api/auth/sessions/{}", addr, session_id))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

@@ -157,6 +157,36 @@ pub async fn revoke_session(
     }
 }
 
+/// Revoke a session by its UUID, if the caller's role is high enough.
+///
+/// Returns `Ok(true)` if revoked, `Ok(false)` if the session ID was not found,
+/// or `Err(target_role)` if the target session has a higher role than the caller.
+pub async fn revoke_session_by_id(
+    store: &SessionStore,
+    session_id: Uuid,
+    caller_role: Role,
+) -> Result<bool, Role> {
+    let mut map = store.lock().await;
+    // Find the token key for this session ID.
+    let token_key = map
+        .iter()
+        .find(|(_, s)| s.session_id == session_id)
+        .map(|(t, _)| t.clone());
+
+    if let Some(token) = token_key {
+        let session = &map[&token];
+        if session.role > caller_role {
+            return Err(session.role);
+        }
+        let role = session.role;
+        map.remove(&token);
+        tracing::info!(session_id = %session_id, %role, "Gateway session revoked by ID");
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Return a snapshot of all active sessions (for diagnostics/listing).
 pub async fn list_sessions(store: &SessionStore) -> Vec<(Uuid, Instant, Instant, Role)> {
     let map = store.lock().await;
@@ -228,5 +258,44 @@ mod tests {
         let (token, _) = create_session(&store, Role::Viewer).await;
         let result = validate_and_touch(&store, &token).await;
         assert_eq!(result.map(|(_, r)| r), Some(Role::Viewer));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_by_id() {
+        let store = new_session_store();
+        let (token, session_id) = create_session(&store, Role::User).await;
+
+        // Admin can revoke a User session by ID.
+        assert_eq!(
+            revoke_session_by_id(&store, session_id, Role::Admin).await,
+            Ok(true)
+        );
+        // Token should no longer be valid.
+        assert!(validate_and_touch(&store, &token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_by_id_blocked() {
+        let store = new_session_store();
+        let (token, session_id) = create_session(&store, Role::Owner).await;
+
+        // Admin cannot revoke an Owner session.
+        assert!(
+            revoke_session_by_id(&store, session_id, Role::Admin)
+                .await
+                .is_err()
+        );
+        // Session should still be valid.
+        assert!(validate_and_touch(&store, &token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_by_id_not_found() {
+        let store = new_session_store();
+        let fake_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            revoke_session_by_id(&store, fake_id, Role::Owner).await,
+            Ok(false)
+        );
     }
 }

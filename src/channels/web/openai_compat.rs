@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{
@@ -17,12 +17,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::channels::web::rbac::Permission;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, Role, ToolCall, ToolCompletionRequest,
     ToolDefinition,
 };
 
 use super::server::GatewayState;
+
+/// RBAC alias to avoid confusion with `crate::llm::Role`.
+type RbacRole = crate::channels::web::rbac::Role;
 
 const MAX_MODEL_NAME_BYTES: usize = 256;
 
@@ -372,6 +376,25 @@ fn openai_error(
     )
 }
 
+/// Check an RBAC permission, returning an OpenAI-formatted error on failure.
+fn require_openai_permission(
+    role: RbacRole,
+    perm: Permission,
+) -> Result<(), (StatusCode, Json<OpenAiErrorResponse>)> {
+    if role.has_permission(perm) {
+        Ok(())
+    } else {
+        Err(openai_error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "Insufficient permissions: requires {} role",
+                perm.minimum_role()
+            ),
+            "permission_error",
+        ))
+    }
+}
+
 fn chat_completion_id() -> String {
     format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
 }
@@ -424,9 +447,12 @@ fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 pub async fn chat_completions_handler(
+    Extension(role): Extension<RbacRole>,
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
+    require_openai_permission(role, Permission::SendMessage)?;
+
     if !state.chat_rate_limiter.check() {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -804,8 +830,11 @@ async fn send_finish_chunk(
 }
 
 pub async fn models_handler(
+    Extension(role): Extension<RbacRole>,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<OpenAiErrorResponse>)> {
+    require_openai_permission(role, Permission::ViewGatewayStatus)?;
+
     let llm = state.llm_provider.as_ref().ok_or_else(|| {
         openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
