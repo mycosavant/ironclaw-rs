@@ -18,6 +18,7 @@ pub mod auth;
 pub mod log_layer;
 pub mod openai_compat;
 pub mod pid_lock;
+pub mod rbac;
 pub mod server;
 pub mod session_store;
 pub mod sse;
@@ -103,6 +104,7 @@ impl GatewayChannel {
             session_store: session_store::new_session_store(),
             channel_health: None,
             trusted_proxy_header: config.trusted_proxy_header.clone(),
+            roles: config.roles.clone(),
         });
 
         Self {
@@ -144,6 +146,7 @@ impl GatewayChannel {
             channel_health: self.state.channel_health.clone(),
             session_store: self.state.session_store.clone(),
             trusted_proxy_header: self.state.trusted_proxy_header.clone(),
+            roles: self.state.roles.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

@@ -29,6 +29,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::channels::web::rbac::Role;
+
 /// Inactivity TTL for gateway sessions (24 hours).
 pub const SESSION_TTL_SECS: u64 = 86_400;
 
@@ -47,6 +49,8 @@ pub struct GatewaySession {
     pub created_at: Instant,
     /// When the session token was last accepted.
     pub last_used: Instant,
+    /// RBAC role assigned to this session.
+    pub role: Role,
 }
 
 /// Session store: maps opaque 64-char hex token → [`GatewaySession`].
@@ -73,10 +77,10 @@ fn generate_token() -> String {
     })
 }
 
-/// Create a new session, evicting the oldest if at capacity.
+/// Create a new session with the given role, evicting the oldest if at capacity.
 ///
 /// Returns `(token, session_id)`.
-pub async fn create_session(store: &SessionStore) -> (String, Uuid) {
+pub async fn create_session(store: &SessionStore, role: Role) -> (String, Uuid) {
     let mut map = store.lock().await;
 
     // Evict expired sessions first.
@@ -103,23 +107,24 @@ pub async fn create_session(store: &SessionStore) -> (String, Uuid) {
             session_id,
             created_at: now,
             last_used: now,
+            role,
         },
     );
 
-    tracing::info!(session_id = %session_id, "Gateway session created");
+    tracing::info!(session_id = %session_id, %role, "Gateway session created");
     (token, session_id)
 }
 
 /// Validate a token and, if valid, refresh its `last_used` timestamp.
 ///
-/// Returns the session ID if the token is present and not expired.
-pub async fn validate_and_touch(store: &SessionStore, token: &str) -> Option<Uuid> {
+/// Returns `(session_id, role)` if the token is present and not expired.
+pub async fn validate_and_touch(store: &SessionStore, token: &str) -> Option<(Uuid, Role)> {
     let mut map = store.lock().await;
     if let Some(session) = map.get_mut(token) {
         let elapsed = session.last_used.elapsed().as_secs();
         if elapsed < SESSION_TTL_SECS {
             session.last_used = Instant::now();
-            return Some(session.session_id);
+            return Some((session.session_id, session.role));
         }
         // Expired — remove it.
         let id = session.session_id;
@@ -143,10 +148,10 @@ pub async fn revoke_session(store: &SessionStore, token: &str) -> bool {
 }
 
 /// Return a snapshot of all active sessions (for diagnostics/listing).
-pub async fn list_sessions(store: &SessionStore) -> Vec<(Uuid, Instant, Instant)> {
+pub async fn list_sessions(store: &SessionStore) -> Vec<(Uuid, Instant, Instant, Role)> {
     let map = store.lock().await;
     map.values()
-        .map(|s| (s.session_id, s.created_at, s.last_used))
+        .map(|s| (s.session_id, s.created_at, s.last_used, s.role))
         .collect()
 }
 
@@ -157,16 +162,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_validate_session() {
         let store = new_session_store();
-        let (token, id) = create_session(&store).await;
+        let (token, id) = create_session(&store, Role::User).await;
         assert_eq!(token.len(), 64);
         let result = validate_and_touch(&store, &token).await;
-        assert_eq!(result, Some(id));
+        assert_eq!(result, Some((id, Role::User)));
     }
 
     #[tokio::test]
     async fn test_revoke_session() {
         let store = new_session_store();
-        let (token, _) = create_session(&store).await;
+        let (token, _) = create_session(&store, Role::User).await;
         assert!(revoke_session(&store, &token).await);
         assert!(validate_and_touch(&store, &token).await.is_none());
         // Double-revoke is a no-op.
@@ -184,14 +189,22 @@ mod tests {
         let store = new_session_store();
         let mut tokens = Vec::new();
         for _ in 0..MAX_GATEWAY_SESSIONS {
-            let (t, _) = create_session(&store).await;
+            let (t, _) = create_session(&store, Role::User).await;
             tokens.push(t);
         }
         assert_eq!(store.lock().await.len(), MAX_GATEWAY_SESSIONS);
         // Creating one more should evict the oldest.
-        let (new_token, _) = create_session(&store).await;
+        let (new_token, _) = create_session(&store, Role::Admin).await;
         let map = store.lock().await;
         assert_eq!(map.len(), MAX_GATEWAY_SESSIONS);
         assert!(map.contains_key(&new_token));
+    }
+
+    #[tokio::test]
+    async fn test_session_preserves_role() {
+        let store = new_session_store();
+        let (token, _) = create_session(&store, Role::Viewer).await;
+        let result = validate_and_touch(&store, &token).await;
+        assert_eq!(result.map(|(_, r)| r), Some(Role::Viewer));
     }
 }

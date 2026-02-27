@@ -319,6 +319,14 @@ pub struct AgentSettings {
     /// Sliding-window size for SHA-256 cycle detection. 0 = disabled.
     #[serde(default = "default_cycle_window_size")]
     pub cycle_window_size: usize,
+
+    /// Inter-agent message bus capacity per job inbox. Default: 256.
+    #[serde(default = "default_agent_bus_capacity")]
+    pub agent_bus_capacity: usize,
+
+    /// Maximum child agents a single job can spawn. Default: 5.
+    #[serde(default = "default_max_child_agents")]
+    pub max_child_agents: usize,
 }
 
 fn default_agent_name() -> String {
@@ -357,6 +365,14 @@ fn default_cycle_window_size() -> usize {
     8
 }
 
+fn default_agent_bus_capacity() -> usize {
+    256
+}
+
+fn default_max_child_agents() -> usize {
+    5
+}
+
 fn default_true() -> bool {
     true
 }
@@ -376,6 +392,8 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             suppress_tool_errors: false,
             cycle_window_size: default_cycle_window_size(),
+            agent_bus_capacity: default_agent_bus_capacity(),
+            max_child_agents: default_max_child_agents(),
         }
     }
 }

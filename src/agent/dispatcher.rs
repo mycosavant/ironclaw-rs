@@ -1040,6 +1040,7 @@ mod tests {
             routine_tick: None,
             repair_tick: None,
             job_event_tx: None,
+            agent_bus: None,
         };
 
         Agent::new(
@@ -1059,6 +1060,8 @@ mod tests {
                 auto_approve_tools: false,
                 suppress_tool_errors: false,
                 cycle_window_size: 10,
+                agent_bus_capacity: 256,
+                max_child_agents: 5,
             },
             deps,
             Arc::new(ChannelManager::new()),

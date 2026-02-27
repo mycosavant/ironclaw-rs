@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::channels::web::rbac::Role;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -79,6 +81,10 @@ pub struct GatewayConfig {
     pub trusted_proxy_header: Option<String>,
     /// Network mode controlling bind address and security posture.
     pub network_mode: GatewayNetworkMode,
+    /// RBAC role assignments. Maps a token prefix (or user identifier) to a role.
+    /// Parsed from `GATEWAY_ROLES` env var as JSON: `{"token-prefix":"admin","other":"viewer"}`.
+    /// The master `GATEWAY_AUTH_TOKEN` always gets `Owner` role implicitly.
+    pub roles: HashMap<String, Role>,
 }
 
 impl ChannelsConfig {
@@ -126,6 +132,16 @@ impl ChannelsConfig {
                 GatewayNetworkMode::Loopback => {}
             }
 
+            let roles: HashMap<String, Role> = optional_env("GATEWAY_ROLES")?
+                .map(|raw| {
+                    serde_json::from_str(&raw).map_err(|e| ConfigError::InvalidValue {
+                        key: "GATEWAY_ROLES".to_string(),
+                        message: format!("invalid JSON: {e}"),
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
+
             Some(GatewayConfig {
                 host,
                 port: parse_optional_env("GATEWAY_PORT", 3000)?,
@@ -133,6 +149,7 @@ impl ChannelsConfig {
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
                 trusted_proxy_header: optional_env("GATEWAY_TRUSTED_PROXY_HEADER")?,
                 network_mode,
+                roles,
             })
         } else {
             None

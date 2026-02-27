@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::agent::Scheduler;
+use crate::agent::messaging::{self, AgentMessage, AgentMessageBus};
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -22,7 +24,9 @@ use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+};
 
 /// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
 ///
@@ -1286,6 +1290,319 @@ impl Tool for JobPromptTool {
     }
 }
 
+// ─── Inter-Agent Communication Tools ─────────────────────────────────
+
+/// Tool for spawning a child agent job.
+///
+/// Wraps `Scheduler::dispatch_job()` and stamps `parent_job_id` in the
+/// child's metadata so the lineage is traceable. Enforces a per-parent
+/// `max_child_agents` limit.
+pub struct AgentSpawnTool {
+    scheduler: Arc<Scheduler>,
+    context_manager: Arc<ContextManager>,
+    max_child_agents: usize,
+}
+
+impl AgentSpawnTool {
+    pub fn new(
+        scheduler: Arc<Scheduler>,
+        context_manager: Arc<ContextManager>,
+        max_child_agents: usize,
+    ) -> Self {
+        Self {
+            scheduler,
+            context_manager,
+            max_child_agents,
+        }
+    }
+
+    /// Count active child agents for a given parent job.
+    async fn active_child_count(&self, parent_job_id: Uuid) -> usize {
+        let parent_str = parent_job_id.to_string();
+        let all_ids = self.context_manager.all_jobs().await;
+        let mut count = 0;
+        for id in all_ids {
+            if let Ok(ctx) = self.context_manager.get_context(id).await {
+                // Only count jobs that are still running.
+                if !matches!(
+                    ctx.state,
+                    JobState::Completed | JobState::Failed | JobState::Cancelled
+                ) && ctx.metadata.get("parent_job_id").and_then(|v| v.as_str())
+                    == Some(&parent_str)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+}
+
+#[async_trait]
+impl Tool for AgentSpawnTool {
+    fn name(&self) -> &str {
+        "agent_spawn"
+    }
+
+    fn description(&self) -> &str {
+        "Spawn a child agent job. Returns the new job's UUID. The child runs \
+         independently and can communicate back via agent_send."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the child agent job"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed task description/instructions for the child agent"
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional metadata to attach to the child job"
+                }
+            },
+            "required": ["title", "description"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let title = require_str(&params, "title")?;
+        let description = require_str(&params, "description")?;
+
+        // Enforce max child agents.
+        let active = self.active_child_count(ctx.job_id).await;
+        if active >= self.max_child_agents {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Child agent limit reached ({}/{}). Wait for a child to finish or cancel one.",
+                active, self.max_child_agents
+            )));
+        }
+
+        // Build metadata: merge user-provided with parent lineage.
+        let mut meta = params
+            .get("metadata")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "parent_job_id".to_string(),
+                serde_json::Value::String(ctx.job_id.to_string()),
+            );
+        }
+
+        let child_id = self
+            .scheduler
+            .dispatch_job(&ctx.user_id, title, description, Some(meta))
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let result = serde_json::json!({
+            "child_job_id": child_id.to_string(),
+            "status": "spawned",
+            "active_children": active + 1,
+            "max_children": self.max_child_agents,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        Some(ToolRateLimitConfig::new(5, 60))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+/// Tool for sending a message to another running agent job.
+///
+/// Uses the [`AgentMessageBus`] to route a JSON payload to the target job's
+/// inbox. Optionally waits for a reply with a configurable timeout.
+pub struct AgentSendTool {
+    agent_bus: AgentMessageBus,
+    context_manager: Arc<ContextManager>,
+}
+
+impl AgentSendTool {
+    pub fn new(agent_bus: AgentMessageBus, context_manager: Arc<ContextManager>) -> Self {
+        Self {
+            agent_bus,
+            context_manager,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for AgentSendTool {
+    fn name(&self) -> &str {
+        "agent_send"
+    }
+
+    fn description(&self) -> &str {
+        "Send a JSON message to another running agent job. Optionally wait for \
+         a reply with a timeout. The target job receives the message between its \
+         LLM turns."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "to_job_id": {
+                    "type": "string",
+                    "description": "Target job UUID or short prefix"
+                },
+                "payload": {
+                    "description": "Message payload (any JSON value)"
+                },
+                "wait_reply": {
+                    "type": "boolean",
+                    "description": "If true, block until the target replies or timeout",
+                    "default": false
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Reply timeout in seconds (only used when wait_reply=true)",
+                    "default": 30
+                }
+            },
+            "required": ["to_job_id", "payload"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let to_job_raw = require_str(&params, "to_job_id")?;
+        let to_job_id = resolve_job_id(to_job_raw, &self.context_manager).await?;
+
+        let payload = params
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::json!(null));
+        let wait_reply = params
+            .get("wait_reply")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let timeout_secs = params
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30)
+            .min(300); // Hard cap at 5 minutes to prevent indefinite worker stalls.
+
+        // Verify target exists, belongs to the same user, and is still active.
+        let target_ctx = self
+            .context_manager
+            .get_context(to_job_id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        if target_ctx.user_id != ctx.user_id {
+            return Err(ToolError::ExecutionFailed(
+                "Cannot send messages to jobs owned by a different user".to_string(),
+            ));
+        }
+
+        if matches!(
+            target_ctx.state,
+            JobState::Completed | JobState::Failed | JobState::Cancelled
+        ) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Target job {} is {:?}, cannot receive messages",
+                to_job_id, target_ctx.state
+            )));
+        }
+
+        if wait_reply {
+            // Request-reply: create a oneshot and await it.
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let msg = AgentMessage {
+                from_job_id: ctx.job_id,
+                payload: payload.clone(),
+                reply_tx: Some(reply_tx),
+            };
+
+            messaging::send_message(&self.agent_bus, to_job_id, msg)
+                .await
+                .map_err(ToolError::ExecutionFailed)?;
+
+            // Wait for reply with timeout.
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), reply_rx).await {
+                Ok(Ok(reply)) => {
+                    let result = serde_json::json!({
+                        "status": "replied",
+                        "to_job_id": to_job_id.to_string(),
+                        "reply": reply,
+                    });
+                    Ok(ToolOutput::success(result, start.elapsed()))
+                }
+                Ok(Err(_)) => {
+                    // Reply channel dropped (target finished without replying).
+                    let result = serde_json::json!({
+                        "status": "no_reply",
+                        "to_job_id": to_job_id.to_string(),
+                        "reason": "Target job closed without replying",
+                    });
+                    Ok(ToolOutput::success(result, start.elapsed()))
+                }
+                Err(_) => {
+                    let result = serde_json::json!({
+                        "status": "timeout",
+                        "to_job_id": to_job_id.to_string(),
+                        "timeout_secs": timeout_secs,
+                    });
+                    Ok(ToolOutput::success(result, start.elapsed()))
+                }
+            }
+        } else {
+            // Fire-and-forget.
+            let msg = AgentMessage {
+                from_job_id: ctx.job_id,
+                payload: payload.clone(),
+                reply_tx: None,
+            };
+
+            messaging::send_message(&self.agent_bus, to_job_id, msg)
+                .await
+                .map_err(ToolError::ExecutionFailed)?;
+
+            let result = serde_json::json!({
+                "status": "sent",
+                "to_job_id": to_job_id.to_string(),
+            });
+            Ok(ToolOutput::success(result, start.elapsed()))
+        }
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1788,5 +2105,234 @@ mod tests {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
         assert!(result.is_err());
+    }
+
+    // ─── AgentSpawnTool tests ───────────────────────────────────────
+
+    /// Minimal mock LLM for scheduler-based tests.
+    struct MockLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmProvider for MockLlm {
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _request: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError>
+        {
+            Ok(crate::llm::CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                reasoning_content: None,
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _request: crate::llm::ToolCompletionRequest,
+        ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError>
+        {
+            Ok(crate::llm::ToolCompletionResponse {
+                content: Some("done".to_string()),
+                tool_calls: vec![],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    /// Build a lightweight Scheduler suitable for tests (no DB, no event bus).
+    fn test_scheduler(cm: Arc<ContextManager>) -> Arc<crate::agent::Scheduler> {
+        let config = crate::config::AgentConfig::default();
+        let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(MockLlm);
+        let safety = Arc::new(crate::safety::SafetyLayer::new(
+            &crate::config::SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+                http_url_allowlist: None,
+            },
+        ));
+        let tools = Arc::new(crate::tools::registry::ToolRegistry::new());
+        let hooks = Arc::new(crate::hooks::HookRegistry::new());
+        Arc::new(crate::agent::Scheduler::new(
+            config, cm, llm, safety, tools, None, hooks, None, None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_valid_dispatch() {
+        let cm = Arc::new(ContextManager::new(5));
+        let scheduler = test_scheduler(cm.clone());
+        let tool = AgentSpawnTool::new(scheduler, cm.clone(), 5);
+
+        let ctx = JobContext::default();
+        let params = serde_json::json!({
+            "title": "Child job",
+            "description": "Do something",
+        });
+
+        let result = tool.execute(params, &ctx).await.unwrap();
+        assert_eq!(result.result["status"], "spawned");
+        assert!(result.result["child_job_id"].is_string());
+        assert_eq!(result.result["active_children"], 1);
+        assert_eq!(result.result["max_children"], 5);
+
+        // Verify child has parent_job_id metadata.
+        let child_id: Uuid = result.result["child_job_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let child_ctx = cm.get_context(child_id).await.unwrap();
+        assert_eq!(
+            child_ctx.metadata["parent_job_id"].as_str().unwrap(),
+            ctx.job_id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_max_child_limit() {
+        let cm = Arc::new(ContextManager::new(10));
+        let scheduler = test_scheduler(cm.clone());
+        // Allow only 1 child.
+        let tool = AgentSpawnTool::new(scheduler, cm.clone(), 1);
+
+        // Use a fixed parent job_id so the metadata scan works.
+        let ctx = JobContext {
+            job_id: Uuid::new_v4(),
+            ..Default::default()
+        };
+
+        // Spawn first child — should succeed.
+        let params = serde_json::json!({
+            "title": "Child 1",
+            "description": "first",
+        });
+        let result = tool.execute(params, &ctx).await.unwrap();
+        assert_eq!(result.result["status"], "spawned");
+
+        // Spawn second child — should be rejected.
+        let params = serde_json::json!({
+            "title": "Child 2",
+            "description": "second",
+        });
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err(), "should reject second child");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Child agent limit reached"),
+            "expected limit message, got: {err}"
+        );
+    }
+
+    // ─── AgentSendTool tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_send_fire_and_forget() {
+        let bus = crate::agent::messaging::new_message_bus();
+        let cm = Arc::new(ContextManager::new(5));
+        let target_id = cm.create_job("Target", "target desc").await.unwrap();
+
+        // Register target inbox in the bus.
+        let (inbox_tx, mut inbox_rx) = tokio::sync::mpsc::channel(16);
+        crate::agent::messaging::register_inbox(&bus, target_id, inbox_tx).await;
+
+        let tool = AgentSendTool::new(bus, cm);
+        let caller_ctx = JobContext::default();
+        let params = serde_json::json!({
+            "to_job_id": target_id.to_string(),
+            "payload": {"hello": "world"},
+        });
+
+        let result = tool.execute(params, &caller_ctx).await.unwrap();
+        assert_eq!(result.result["status"], "sent");
+
+        // Verify the message was delivered.
+        let msg = inbox_rx.try_recv().expect("should have received message");
+        assert_eq!(msg.payload["hello"], "world");
+        assert!(msg.reply_tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_to_missing_job_fails() {
+        let bus = crate::agent::messaging::new_message_bus();
+        let cm = Arc::new(ContextManager::new(5));
+        // Create a job so resolve_job_id can find it, but don't register inbox.
+        let job_id = cm.create_job("Ghost", "desc").await.unwrap();
+
+        let tool = AgentSendTool::new(bus, cm);
+        let ctx = JobContext::default();
+        let params = serde_json::json!({
+            "to_job_id": job_id.to_string(),
+            "payload": null,
+        });
+
+        // Job exists in ContextManager but no inbox registered → send_message error.
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err(), "should fail when inbox not registered");
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_with_reply() {
+        let bus = crate::agent::messaging::new_message_bus();
+        let cm = Arc::new(ContextManager::new(5));
+        let target_id = cm.create_job("Replier", "desc").await.unwrap();
+
+        let (inbox_tx, mut inbox_rx) = tokio::sync::mpsc::channel(16);
+        crate::agent::messaging::register_inbox(&bus, target_id, inbox_tx).await;
+
+        let tool = AgentSendTool::new(bus, cm);
+        let caller_ctx = JobContext::default();
+        let params = serde_json::json!({
+            "to_job_id": target_id.to_string(),
+            "payload": {"question": "status?"},
+            "wait_reply": true,
+            "timeout_secs": 2,
+        });
+
+        // Spawn the tool in the background so we can reply from the inbox.
+        let tool_handle = tokio::spawn(async move { tool.execute(params, &caller_ctx).await });
+
+        // Simulate the target replying.
+        let msg = inbox_rx.recv().await.expect("should receive message");
+        assert!(msg.reply_tx.is_some());
+        msg.reply_tx
+            .unwrap()
+            .send(serde_json::json!({"answer": "ok"}))
+            .expect("reply send ok");
+
+        let result = tool_handle.await.unwrap().unwrap();
+        assert_eq!(result.result["status"], "replied");
+        assert_eq!(result.result["reply"]["answer"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_reply_timeout() {
+        let bus = crate::agent::messaging::new_message_bus();
+        let cm = Arc::new(ContextManager::new(5));
+        let target_id = cm.create_job("Slow", "desc").await.unwrap();
+
+        let (inbox_tx, _inbox_rx) = tokio::sync::mpsc::channel(16);
+        crate::agent::messaging::register_inbox(&bus, target_id, inbox_tx).await;
+
+        let tool = AgentSendTool::new(bus, cm);
+        let ctx = JobContext::default();
+        let params = serde_json::json!({
+            "to_job_id": target_id.to_string(),
+            "payload": "ping",
+            "wait_reply": true,
+            "timeout_secs": 1,
+        });
+
+        let result = tool.execute(params, &ctx).await.unwrap();
+        assert_eq!(result.result["status"], "timeout");
     }
 }

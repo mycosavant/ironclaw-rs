@@ -1,5 +1,7 @@
 //! Bearer token authentication middleware for the web gateway.
 
+use std::collections::HashMap;
+
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
@@ -8,6 +10,7 @@ use axum::{
 };
 use subtle::ConstantTimeEq;
 
+use crate::channels::web::rbac::Role;
 use crate::channels::web::server::{SSE_TICKET_TTL_SECS, SseTicketStore};
 use crate::channels::web::session_store::{SessionStore, validate_and_touch};
 
@@ -23,9 +26,12 @@ pub struct AuthState {
     /// requests with a non-empty value in this header bypass token auth.
     /// Only safe behind a reverse proxy that strips and re-sets this header.
     pub trusted_proxy_header: Option<String>,
+    /// RBAC role map from config. Maps token prefixes / user identifiers to roles.
+    pub roles: HashMap<String, Role>,
 }
 
-/// Auth middleware that validates bearer token from header or query param.
+/// Auth middleware that validates bearer token from header or query param,
+/// resolves the caller's RBAC role, and injects it as `Extension<Role>`.
 ///
 /// SSE connections can't set headers from `EventSource`, so we also accept
 /// `?token=xxx` or `?ticket=xxx` as query parameters.
@@ -35,7 +41,7 @@ pub struct AuthState {
 pub async fn auth_middleware(
     State(auth): State<AuthState>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     // Trusted-proxy mode: if configured, trust the upstream proxy header.
@@ -45,6 +51,9 @@ pub async fn auth_middleware(
         && let Ok(user) = value.to_str()
         && !user.is_empty()
     {
+        // Look up the proxy user in the roles map; default to User.
+        let role = auth.roles.get(user).copied().unwrap_or(Role::User);
+        request.extensions_mut().insert(role);
         return next.run(request).await;
     }
 
@@ -52,12 +61,17 @@ pub async fn auth_middleware(
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && let Some(token) = value.strip_prefix("Bearer ")
-        && (bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-            || validate_and_touch(&auth.session_store, token)
-                .await
-                .is_some())
     {
-        return next.run(request).await;
+        // Master token → Owner
+        if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
+            request.extensions_mut().insert(Role::Owner);
+            return next.run(request).await;
+        }
+        // Session token → stored role
+        if let Some((_session_id, role)) = validate_and_touch(&auth.session_store, token).await {
+            request.extensions_mut().insert(role);
+            return next.run(request).await;
+        }
     }
 
     if let Some(query) = request.uri().query() {
@@ -67,16 +81,22 @@ pub async fn auth_middleware(
             // or other special characters work correctly when the browser encodes the URL.
             if let Some(raw) = pair.strip_prefix("token=") {
                 let token = urlencoding::decode(raw).unwrap_or(std::borrow::Cow::Borrowed(raw));
-                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-                    || validate_and_touch(&auth.session_store, token.as_ref())
-                        .await
-                        .is_some()
+                // Master token → Owner
+                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
+                    request.extensions_mut().insert(Role::Owner);
+                    return next.run(request).await;
+                }
+                // Session token → stored role
+                if let Some((_session_id, role)) =
+                    validate_and_touch(&auth.session_store, token.as_ref()).await
                 {
+                    request.extensions_mut().insert(role);
                     return next.run(request).await;
                 }
             }
 
             // One-time SSE ticket: consumed on first use, expires after TTL.
+            // SSE tickets inherit User role by default.
             if let Some(ticket_raw) = pair.strip_prefix("ticket=") {
                 let ticket = urlencoding::decode(ticket_raw)
                     .unwrap_or(std::borrow::Cow::Borrowed(ticket_raw));
@@ -86,6 +106,7 @@ pub async fn auth_middleware(
                         // Consume the ticket (one-time use) and allow the request.
                         map.remove(ticket.as_ref());
                         drop(map);
+                        request.extensions_mut().insert(Role::User);
                         return next.run(request).await;
                     }
                     // Expired — remove it and fall through to reject.
@@ -111,6 +132,7 @@ mod tests {
             )),
             session_store: crate::channels::web::session_store::new_session_store(),
             trusted_proxy_header: None,
+            roles: HashMap::new(),
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");

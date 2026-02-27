@@ -264,12 +264,17 @@ pub enum HookError {
 pub struct HookContext {
     /// Arbitrary metadata hooks can use.
     pub metadata: serde_json::Value,
+    /// RBAC role of the caller, if the event originated from the web gateway.
+    /// Uses `String` rather than `Role` to avoid coupling the hook system to
+    /// web gateway types.
+    pub role: Option<String>,
 }
 
 impl Default for HookContext {
     fn default() -> Self {
         Self {
             metadata: serde_json::Value::Null,
+            role: None,
         }
     }
 }

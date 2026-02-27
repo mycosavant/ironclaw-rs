@@ -500,6 +500,7 @@ mod tests {
             channel_health: None,
             session_store: crate::channels::web::session_store::new_session_store(),
             trusted_proxy_header: None,
+            roles: std::collections::HashMap::new(),
         }
     }
 }

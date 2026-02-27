@@ -629,12 +629,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
     }
 
+    // Inter-agent communication bus: enables agent_spawn/agent_send tools.
+    let agent_bus = Some(ironclaw::agent::messaging::new_message_bus());
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
         safety: components.safety,
-        tools: components.tools,
+        tools: Arc::clone(&components.tools),
         workspace: components.workspace,
         extension_manager: components.extension_manager,
         skill_registry: components.skill_registry,
@@ -645,6 +648,7 @@ async fn main() -> anyhow::Result<()> {
         routine_tick: Some(routine_tick),
         repair_tick: Some(repair_tick),
         job_event_tx: job_event_tx.clone(),
+        agent_bus: agent_bus.clone(),
     };
 
     let agent = Agent::new(
@@ -654,8 +658,16 @@ async fn main() -> anyhow::Result<()> {
         Some(config.heartbeat.clone()),
         Some(config.hygiene.clone()),
         Some(config.routines.clone()),
-        Some(components.context_manager),
+        Some(Arc::clone(&components.context_manager)),
         Some(session_manager),
+    );
+
+    // Register IAC tools after Agent creation (they need the Scheduler).
+    components.tools.register_iac_tools(
+        agent.scheduler().clone(),
+        agent_bus,
+        components.context_manager,
+        config.agent.max_child_agents,
     );
 
     agent.run().await?;

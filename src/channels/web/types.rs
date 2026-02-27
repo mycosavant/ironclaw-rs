@@ -774,6 +774,15 @@ pub struct SseTicketResponse {
 
 // --- Auth / Session ---
 
+/// Request body for `POST /api/auth/session`.
+#[derive(Debug, Deserialize)]
+pub struct SessionCreateRequest {
+    /// Role to assign to the new session. Must be ≤ the caller's own role.
+    /// Defaults to `User` if omitted.
+    #[serde(default)]
+    pub role: Option<crate::channels::web::rbac::Role>,
+}
+
 /// Response to `POST /api/auth/session`.
 #[derive(Debug, Serialize)]
 pub struct SessionCreateResponse {
@@ -786,6 +795,8 @@ pub struct SessionCreateResponse {
     pub session_id: String,
     /// Seconds of inactivity remaining before the session expires.
     pub expires_in_secs: u64,
+    /// The RBAC role assigned to this session.
+    pub role: String,
 }
 
 /// One entry in a session listing.
@@ -796,6 +807,8 @@ pub struct SessionListEntry {
     pub last_used_secs_ago: u64,
     /// Seconds remaining before inactivity expiry.
     pub expires_in_secs: u64,
+    /// The RBAC role assigned to this session.
+    pub role: String,
 }
 
 /// Response to `GET /api/auth/sessions`.

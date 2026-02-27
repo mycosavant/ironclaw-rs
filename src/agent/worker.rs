@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::agent::messaging::{AgentMessage, AgentMessageBus};
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::context::{ContextManager, JobState};
@@ -41,6 +42,8 @@ pub struct WorkerDeps {
         Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
     /// Sliding-window size for tool-call cycle detection. 0 = disabled.
     pub cycle_window_size: usize,
+    /// Inter-agent message bus for routed per-job communication.
+    pub agent_bus: Option<AgentMessageBus>,
 }
 
 /// Worker that executes a single job.
@@ -139,7 +142,11 @@ impl Worker {
     }
 
     /// Run the worker until the job is complete or stopped.
-    pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
+    pub async fn run(
+        self,
+        mut rx: mpsc::Receiver<WorkerMessage>,
+        mut inbox: Option<mpsc::Receiver<AgentMessage>>,
+    ) -> Result<(), Error> {
         tracing::info!("Worker starting for job {}", self.job_id);
 
         // Wait for start signal
@@ -181,7 +188,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Main execution loop with timeout
         let result = tokio::time::timeout(self.timeout(), async {
-            self.execution_loop(&mut rx, &reasoning, &mut reason_ctx)
+            self.execution_loop(&mut rx, &reasoning, &mut reason_ctx, &mut inbox)
                 .await
         })
         .await;
@@ -208,6 +215,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
+        inbox: &mut Option<mpsc::Receiver<AgentMessage>>,
     ) -> Result<(), Error> {
         const MAX_WORKER_ITERATIONS: usize = 500;
         let max_iterations = self
@@ -291,6 +299,34 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         tracing::trace!("Worker for job {} received ping", self.job_id);
                     }
                     WorkerMessage::Start => {}
+                }
+            }
+
+            // Drain inter-agent messages and inject into LLM context.
+            // Payloads are sanitized through SafetyLayer to defend against
+            // prompt injection from compromised or adversarial sibling jobs.
+            if let Some(inbox_rx) = inbox {
+                while let Ok(msg) = inbox_rx.try_recv() {
+                    let from = msg.from_job_id;
+                    let payload_str = serde_json::to_string_pretty(&msg.payload)
+                        .unwrap_or_else(|_| msg.payload.to_string());
+                    let sanitized = self
+                        .safety()
+                        .sanitize_tool_output("agent_message", &payload_str);
+                    reason_ctx.messages.push(ChatMessage::system(format!(
+                        "[Inter-agent message from job {from}]\n{}",
+                        sanitized.content
+                    )));
+                    // Reply channels are intentionally dropped here — the LLM
+                    // should use `agent_send` to reply explicitly.
+                    drop(msg.reply_tx);
+                    self.log_event(
+                        "agent_message_received",
+                        serde_json::json!({
+                            "from_job_id": from.to_string(),
+                            "payload": msg.payload,
+                        }),
+                    );
                 }
             }
 
@@ -1234,6 +1270,7 @@ mod tests {
             suppress_tool_errors: false,
             job_event_tx: None,
             cycle_window_size: 8,
+            agent_bus: None,
         };
 
         Worker::new(job_id, deps)
