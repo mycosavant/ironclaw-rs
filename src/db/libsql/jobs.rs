@@ -118,6 +118,7 @@ impl JobStore for LibSqlBackend {
                     metadata: serde_json::Value::Null,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                     active_skill_trust: None,
+                    progress: crate::context::progress::ProgressSender::noop(),
                 }))
             }
             None => Ok(None),

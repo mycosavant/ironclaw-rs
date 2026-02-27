@@ -428,6 +428,40 @@ impl NearAiChatProvider {
             ),
         })
     }
+
+    /// Send a streaming request and return the raw `reqwest::Response` for SSE parsing.
+    async fn send_stream_request(
+        &self,
+        body: &ChatCompletionRequest,
+    ) -> Result<reqwest::Response, LlmError> {
+        let url = self.api_url("chat/completions");
+        let token = self.resolve_bearer_token().await?;
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let truncated = crate::agent::truncate_for_preview(&text, 512);
+            return Err(LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("HTTP {}: {}", status, truncated),
+            });
+        }
+
+        Ok(response)
+    }
 }
 
 #[async_trait]
@@ -452,6 +486,7 @@ impl LlmProvider for NearAiChatProvider {
             tools: None,
             tool_choice: None,
             thinking,
+            stream: None,
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -537,6 +572,7 @@ impl LlmProvider for NearAiChatProvider {
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice: req.tool_choice,
             thinking,
+            stream: None,
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -639,6 +675,49 @@ impl LlmProvider for NearAiChatProvider {
         }
         Ok(())
     }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<crate::llm::CompletionChunk, crate::error::LlmError>,
+                    > + Send,
+            >,
+        >,
+        crate::error::LlmError,
+    > {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let (thinking, thinking_enabled) = self.resolve_thinking(&model);
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
+        let messages: Vec<ChatCompletionMessage> =
+            raw_messages.into_iter().map(|m| m.into()).collect();
+
+        let request = ChatCompletionRequest {
+            model,
+            messages,
+            temperature: if thinking_enabled {
+                None
+            } else {
+                req.temperature
+            },
+            max_tokens: req.max_tokens,
+            tools: None,
+            tool_choice: None,
+            thinking,
+            stream: Some(true),
+        };
+
+        let response = self.send_stream_request(&request).await?;
+
+        // Parse SSE stream
+        let byte_stream = response.bytes_stream();
+        let chunk_stream = parse_sse_stream(byte_stream);
+        Ok(Box::pin(chunk_stream))
+    }
 }
 
 // OpenAI-compatible Chat Completions API types
@@ -659,6 +738,9 @@ struct ChatCompletionRequest {
     /// Serialized as `{"type": "enabled", "budget_tokens": N}` when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    /// Enable SSE streaming.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -995,6 +1077,53 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
+// ── Streaming SSE delta types ────────────────────────────────────────────────
+
+/// A single SSE chunk from `stream: true` responses.
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    choices: Vec<StreamDeltaChoice>,
+    #[serde(default)]
+    usage: Option<ChatCompletionUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDeltaChoice {
+    #[serde(default)]
+    delta: StreamDeltaMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamDeltaMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamDeltaToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDeltaToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamDeltaFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
 fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
     let Some(u) = usage else {
         return (0, 0);
@@ -1009,6 +1138,191 @@ fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
         }
     });
     (input, output)
+}
+
+/// Parse an SSE byte stream from the OpenAI-compatible streaming API into
+/// [`CompletionChunk`] items.
+///
+/// Each SSE event looks like:
+/// ```text
+/// data: {"choices":[{"delta":{"content":"Hello"},...}],...}
+///
+/// data: [DONE]
+/// ```
+/// Maximum size of the SSE line buffer (4 MiB). Protects against OOM if a
+/// server sends a continuous stream without newlines.
+const MAX_SSE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+fn parse_sse_stream(
+    byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<crate::llm::CompletionChunk, LlmError>> + Send {
+    use futures::StreamExt;
+
+    // State: (pinned byte stream, line buffer, pending Done chunk to emit after content)
+    futures::stream::unfold(
+        (
+            Box::pin(byte_stream),
+            String::new(),
+            None::<crate::llm::CompletionChunk>,
+        ),
+        |(mut stream, mut buffer, pending_done)| async move {
+            use crate::llm::CompletionChunk;
+
+            // If a previous iteration deferred a Done chunk (because a content
+            // delta was emitted first from the same SSE event), yield it now.
+            if let Some(done_chunk) = pending_done {
+                return Some((Ok(done_chunk), (stream, buffer, None)));
+            }
+
+            loop {
+                // Try to extract complete lines from buffer
+                let mut cursor = 0usize;
+                while let Some(rel) = buffer[cursor..].find('\n') {
+                    let newline_pos = cursor + rel;
+                    let line = buffer[cursor..newline_pos].trim_end_matches('\r');
+                    cursor = newline_pos + 1;
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if line == "data: [DONE]" {
+                        buffer.drain(..cursor);
+                        return Some((
+                            Ok(CompletionChunk::Done {
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                finish_reason: crate::llm::FinishReason::Stop,
+                            }),
+                            (stream, buffer, None),
+                        ));
+                    }
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(delta) = serde_json::from_str::<StreamDelta>(data) {
+                            // Extract finish_reason before consuming choices
+                            let finish_reason = delta
+                                .choices
+                                .first()
+                                .and_then(|c| c.finish_reason.as_deref())
+                                .map(|r| match r {
+                                    "stop" => crate::llm::FinishReason::Stop,
+                                    "length" => crate::llm::FinishReason::Length,
+                                    "tool_calls" => crate::llm::FinishReason::ToolUse,
+                                    _ => crate::llm::FinishReason::Unknown,
+                                });
+
+                            // Extract the content/reasoning/tool delta (if any)
+                            // BEFORE checking usage, so that a final chunk carrying
+                            // both content and usage emits the content first.
+                            let mut content_chunk = None;
+
+                            if let Some(choice) = delta.choices.into_iter().next() {
+                                if let Some(content) = choice.delta.content
+                                    && !content.is_empty()
+                                {
+                                    content_chunk = Some(CompletionChunk::ContentDelta(content));
+                                } else if let Some(reasoning) = choice.delta.reasoning_content
+                                    && !reasoning.is_empty()
+                                {
+                                    content_chunk =
+                                        Some(CompletionChunk::ReasoningDelta(reasoning));
+                                } else if let Some(tc) =
+                                    choice.delta.tool_calls.and_then(|mut v| {
+                                        if v.is_empty() {
+                                            None
+                                        } else {
+                                            Some(v.swap_remove(0))
+                                        }
+                                    })
+                                {
+                                    let args = tc
+                                        .function
+                                        .as_ref()
+                                        .and_then(|f| f.arguments.clone())
+                                        .unwrap_or_default();
+                                    content_chunk = Some(CompletionChunk::ToolCallDelta {
+                                        index: tc.index,
+                                        id: tc.id,
+                                        name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                                        arguments_delta: args,
+                                    });
+                                }
+                            }
+
+                            // Check for usage stats (signals end of content)
+                            let done_chunk = delta.usage.and_then(|usage| {
+                                let (input, output) = parse_usage(Some(&usage));
+                                if input > 0 || output > 0 {
+                                    Some(CompletionChunk::Done {
+                                        input_tokens: input,
+                                        output_tokens: output,
+                                        finish_reason: finish_reason
+                                            .unwrap_or(crate::llm::FinishReason::Stop),
+                                    })
+                                } else {
+                                    None
+                                }
+                            });
+
+                            buffer.drain(..cursor);
+
+                            if let Some(chunk) = content_chunk {
+                                // If there's also a Done, defer it to the next iteration
+                                return Some((Ok(chunk), (stream, buffer, done_chunk)));
+                            }
+                            if let Some(done) = done_chunk {
+                                return Some((Ok(done), (stream, buffer, None)));
+                            }
+
+                            // Delta parsed but no actionable content; continue processing
+                            cursor = 0;
+                            continue;
+                        } else {
+                            tracing::warn!(
+                                sse_data = data,
+                                "Failed to parse SSE delta as StreamDelta; skipping"
+                            );
+                        }
+                    }
+                }
+                // Drain processed lines from the buffer
+                buffer.drain(..cursor);
+
+                // Need more data from the byte stream
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        if buffer.len() + bytes.len() > MAX_SSE_BUFFER_BYTES {
+                            return Some((
+                                Err(LlmError::RequestFailed {
+                                    provider: "nearai_chat".to_string(),
+                                    reason: format!(
+                                        "SSE buffer exceeded {} bytes without a newline",
+                                        MAX_SSE_BUFFER_BYTES
+                                    ),
+                                }),
+                                (stream, buffer, None),
+                            ));
+                        }
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            Err(LlmError::RequestFailed {
+                                provider: "nearai_chat".to_string(),
+                                reason: format!("Stream error: {}", e),
+                            }),
+                            (stream, buffer, None),
+                        ));
+                    }
+                    None => {
+                        // Stream ended without [DONE] — treat as unexpected truncation
+                        return None;
+                    }
+                }
+            }
+        },
+    )
 }
 
 #[cfg(test)]

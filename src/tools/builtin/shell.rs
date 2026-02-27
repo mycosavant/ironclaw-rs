@@ -582,6 +582,7 @@ impl ShellTool {
         workdir: &PathBuf,
         timeout: Duration,
         extra_env: &HashMap<String, String>,
+        progress: &crate::context::progress::ProgressSender,
     ) -> Result<(String, i32), ToolError> {
         // Build command
         let mut command = if cfg!(target_os = "windows") {
@@ -627,18 +628,56 @@ impl ShellTool {
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
+        // When a progress sender is active, stream stdout line-by-line so the
+        // user sees real-time output (e.g., during `cargo build` or `pytest`).
+        let stream_progress = progress.is_active();
+        let progress_clone = progress.clone();
+
         let result = tokio::time::timeout(timeout, async {
             let stdout_fut = async {
-                if let Some(mut out) = stdout_handle {
-                    let mut buf = Vec::new();
-                    (&mut out)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await
-                        .ok();
-                    // Drain any remaining output so the child does not block
-                    tokio::io::copy(&mut out, &mut tokio::io::sink()).await.ok();
-                    String::from_utf8_lossy(&buf).to_string()
+                if let Some(out) = stdout_handle {
+                    if stream_progress {
+                        // Line-by-line streaming: each line is sent as a
+                        // progress event AND accumulated for the final result.
+                        use tokio::io::AsyncBufReadExt;
+                        let mut reader = tokio::io::BufReader::new(out);
+                        let mut buf = String::new();
+                        let mut total_bytes = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line).await {
+                                Ok(0) => break, // EOF
+                                Ok(n) => {
+                                    total_bytes += n;
+                                    if total_bytes <= MAX_OUTPUT_SIZE {
+                                        progress_clone.send("shell", &line);
+                                        buf.push_str(&line);
+                                    } else if total_bytes - n <= MAX_OUTPUT_SIZE {
+                                        // First line that crosses the limit: drain the rest
+                                        // silently so the child doesn't block.
+                                        tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                                            .await
+                                            .ok();
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        buf
+                    } else {
+                        // Buffered read (original path)
+                        let mut out = out;
+                        let mut raw = Vec::new();
+                        (&mut out)
+                            .take(MAX_OUTPUT_SIZE as u64)
+                            .read_to_end(&mut raw)
+                            .await
+                            .ok();
+                        // Drain any remaining output so the child does not block
+                        tokio::io::copy(&mut out, &mut tokio::io::sink()).await.ok();
+                        String::from_utf8_lossy(&raw).to_string()
+                    }
                 } else {
                     String::new()
                 }
@@ -708,6 +747,7 @@ impl ShellTool {
         workdir: Option<&str>,
         timeout: Option<u64>,
         extra_env: &HashMap<String, String>,
+        progress: &crate::context::progress::ProgressSender,
     ) -> Result<(String, i64), ToolError> {
         // Check for blocked commands
         if let Some(reason) = self.is_blocked(cmd) {
@@ -764,7 +804,7 @@ impl ShellTool {
 
         // Only execute directly when no sandbox was configured at all.
         let (output, code) = self
-            .execute_direct(cmd, &cwd, timeout_duration, extra_env)
+            .execute_direct(cmd, &cwd, timeout_duration, extra_env, progress)
             .await?;
         Ok((output, code as i64))
     }
@@ -821,7 +861,7 @@ impl Tool for ShellTool {
 
         let start = std::time::Instant::now();
         let (output, exit_code) = self
-            .execute_command(command, workdir, timeout, &ctx.extra_env)
+            .execute_command(command, workdir, timeout, &ctx.extra_env, &ctx.progress)
             .await?;
         let duration = start.elapsed();
 

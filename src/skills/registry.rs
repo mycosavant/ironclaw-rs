@@ -628,7 +628,7 @@ async fn load_and_validate_skill(
     // Compile regex patterns
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
 
-    // Pre-compute lowercased keywords and tags for efficient scoring
+    // Pre-compute lowercased keywords, tags, and routing phrases for efficient scoring
     let lowercased_keywords = manifest
         .activation
         .keywords
@@ -641,6 +641,18 @@ async fn load_and_validate_skill(
         .iter()
         .map(|t| t.to_lowercase())
         .collect();
+    let lowercased_use_when = manifest
+        .activation
+        .use_when
+        .iter()
+        .map(|p| p.to_lowercase())
+        .collect();
+    let lowercased_dont_use_when = manifest
+        .activation
+        .dont_use_when
+        .iter()
+        .map(|p| p.to_lowercase())
+        .collect();
 
     let name = manifest.name.clone();
     let skill = LoadedSkill {
@@ -652,6 +664,8 @@ async fn load_and_validate_skill(
         compiled_patterns,
         lowercased_keywords,
         lowercased_tags,
+        lowercased_use_when,
+        lowercased_dont_use_when,
     };
 
     Ok((name, skill))

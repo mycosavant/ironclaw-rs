@@ -446,6 +446,41 @@ Respond in JSON format:
         }
     }
 
+    /// Stream a simple (non-tool) response from the LLM.
+    ///
+    /// Returns a stream of [`CompletionChunk`] items. The caller should
+    /// forward `ContentDelta` chunks to SSE/WebSocket clients for real-time
+    /// display, then assemble the full text from all `ContentDelta` chunks
+    /// for thread storage.
+    ///
+    /// Falls back to buffered `respond()` for providers that don't support
+    /// native streaming (via the default `complete_stream` implementation).
+    pub async fn respond_stream(
+        &self,
+        context: &ReasoningContext,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<crate::llm::CompletionChunk, crate::error::LlmError>,
+                    > + Send,
+            >,
+        >,
+        LlmError,
+    > {
+        let system_prompt = self.build_conversation_prompt(context);
+
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(context.messages.clone());
+
+        let mut request = CompletionRequest::new(messages)
+            .with_max_tokens(4096)
+            .with_temperature(0.7);
+        request.metadata = context.metadata.clone();
+
+        self.llm.complete_stream(request).await
+    }
+
     /// Generate a response that may include tool calls, with token usage tracking.
     ///
     /// Returns `RespondOutput` containing the result and token usage from the LLM call.

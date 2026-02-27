@@ -331,13 +331,15 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
+        let url_allowlist = self.config.safety.http_url_allowlist.clone();
         let tools = if let Some(ref ss) = self.secrets_store {
             Arc::new(
                 ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss))
+                    .with_http_url_allowlist(url_allowlist),
             )
         } else {
-            Arc::new(ToolRegistry::new())
+            Arc::new(ToolRegistry::new().with_http_url_allowlist(url_allowlist))
         };
         tools.register_builtin_tools();
         tools.register_media_tools();

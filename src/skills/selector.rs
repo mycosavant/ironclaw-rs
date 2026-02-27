@@ -26,6 +26,13 @@ const MAX_TAG_SCORE: u32 = 15;
 /// 20 points each could yield 100 points, dominating keyword+tag scores.
 const MAX_REGEX_SCORE: u32 = 40;
 
+/// Maximum positive routing phrase ("use when") score cap per skill.
+const MAX_USE_WHEN_SCORE: u32 = 30;
+
+/// Penalty per negative routing phrase ("don't use when") match.
+/// Intentionally harsh to discourage activation in wrong contexts.
+const DONT_USE_WHEN_PENALTY: u32 = 30;
+
 /// Result of prefiltering with score information.
 #[derive(Debug)]
 pub struct ScoredSkill<'a> {
@@ -135,6 +142,24 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += regex_score.min(MAX_REGEX_SCORE);
 
+    // "Use when" positive routing phrase scoring (substring match, capped)
+    let mut use_when_score: u32 = 0;
+    for phrase in &skill.lowercased_use_when {
+        if message_lower.contains(phrase.as_str()) {
+            use_when_score += 15;
+        }
+    }
+    score += use_when_score.min(MAX_USE_WHEN_SCORE);
+
+    // "Don't use when" negative routing phrase scoring (hard penalty)
+    let mut penalty: u32 = 0;
+    for phrase in &skill.lowercased_dont_use_when {
+        if message_lower.contains(phrase.as_str()) {
+            penalty += DONT_USE_WHEN_PENALTY;
+        }
+    }
+    score = score.saturating_sub(penalty);
+
     score
 }
 
@@ -145,12 +170,27 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
+        make_skill_with_routing(name, keywords, tags, patterns, &[], &[])
+    }
+
+    fn make_skill_with_routing(
+        name: &str,
+        keywords: &[&str],
+        tags: &[&str],
+        patterns: &[&str],
+        use_when: &[&str],
+        dont_use_when: &[&str],
+    ) -> LoadedSkill {
         let pattern_strings: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
         let compiled = LoadedSkill::compile_patterns(&pattern_strings);
         let kw_vec: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
         let tag_vec: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+        let uw_vec: Vec<String> = use_when.iter().map(|s| s.to_string()).collect();
+        let duw_vec: Vec<String> = dont_use_when.iter().map(|s| s.to_string()).collect();
         let lowercased_keywords = kw_vec.iter().map(|k| k.to_lowercase()).collect();
         let lowercased_tags = tag_vec.iter().map(|t| t.to_lowercase()).collect();
+        let lowercased_use_when = uw_vec.iter().map(|p| p.to_lowercase()).collect();
+        let lowercased_dont_use_when = duw_vec.iter().map(|p| p.to_lowercase()).collect();
         LoadedSkill {
             manifest: SkillManifest {
                 name: name.to_string(),
@@ -160,6 +200,8 @@ mod tests {
                     keywords: kw_vec,
                     patterns: pattern_strings,
                     tags: tag_vec,
+                    use_when: uw_vec,
+                    dont_use_when: duw_vec,
                     max_context_tokens: 1000,
                 },
                 metadata: None,
@@ -171,6 +213,8 @@ mod tests {
             compiled_patterns: compiled,
             lowercased_keywords,
             lowercased_tags,
+            lowercased_use_when,
+            lowercased_dont_use_when,
         }
     }
 
@@ -367,5 +411,56 @@ mod tests {
         let skills = vec![skill, skill2];
         let result = prefilter_skills("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_use_when_boosts_score() {
+        let skill = make_skill_with_routing(
+            "deploy",
+            &["deploy"],
+            &[],
+            &[],
+            &["deploying to production"],
+            &[],
+        );
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "I am deploying to production now",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_dont_use_when_suppresses_skill() {
+        let skill =
+            make_skill_with_routing("deploy", &["deploy"], &[], &[], &[], &["local development"]);
+        let skills = vec![skill];
+        // "deploy" keyword gives 5 points (substring), but "local development"
+        // subtracts 30, so net score is 0 → skill not activated.
+        let result = prefilter_skills(
+            "deploy in local development mode",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_dont_use_when_overrides_keywords() {
+        // Strong keyword match (exact word = 10 pts) still overridden by dont_use_when (30 pts)
+        let skill =
+            make_skill_with_routing("deploy", &["deploy"], &[], &[], &[], &["testing locally"]);
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "deploy but I'm testing locally",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(result.is_empty());
     }
 }

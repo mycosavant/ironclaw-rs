@@ -39,6 +39,12 @@ const MAX_PATTERNS_PER_SKILL: usize = 5;
 /// Maximum number of tags allowed per skill to prevent scoring manipulation.
 const MAX_TAGS_PER_SKILL: usize = 10;
 
+/// Maximum number of "use when" routing phrases per skill.
+const MAX_USE_WHEN_PER_SKILL: usize = 5;
+
+/// Maximum number of "don't use when" routing phrases per skill.
+const MAX_DONT_USE_WHEN_PER_SKILL: usize = 5;
+
 /// Minimum length for keywords and tags. Short tokens like "a" or "is"
 /// match too broadly and can be used to game the scoring system.
 const MIN_KEYWORD_TAG_LENGTH: usize = 3;
@@ -107,13 +113,21 @@ pub struct ActivationCriteria {
     /// Tags for broad category matching.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Positive routing phrases — each match adds score.
+    /// Multi-word phrase matched as substring (case-insensitive).
+    #[serde(default)]
+    pub use_when: Vec<String>,
+    /// Negative routing phrases — each match subtracts score heavily.
+    /// Multi-word phrase matched as substring (case-insensitive).
+    #[serde(default)]
+    pub dont_use_when: Vec<String>,
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
 }
 
 impl ActivationCriteria {
-    /// Enforce limits on keywords, patterns, and tags to prevent scoring manipulation.
+    /// Enforce limits on keywords, patterns, tags, and routing phrases to prevent scoring manipulation.
     ///
     /// Filters out short keywords/tags (< 3 chars) that match too broadly,
     /// then truncates to per-field caps.
@@ -123,6 +137,11 @@ impl ActivationCriteria {
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);
+        self.use_when.retain(|p| p.len() >= MIN_KEYWORD_TAG_LENGTH);
+        self.use_when.truncate(MAX_USE_WHEN_PER_SKILL);
+        self.dont_use_when
+            .retain(|p| p.len() >= MIN_KEYWORD_TAG_LENGTH);
+        self.dont_use_when.truncate(MAX_DONT_USE_WHEN_PER_SKILL);
     }
 }
 
@@ -204,6 +223,10 @@ pub struct LoadedSkill {
     /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
     pub lowercased_tags: Vec<String>,
+    /// Pre-computed lowercased "use when" phrases for routing.
+    pub lowercased_use_when: Vec<String>,
+    /// Pre-computed lowercased "don't use when" phrases for routing.
+    pub lowercased_dont_use_when: Vec<String>,
 }
 
 impl LoadedSkill {
@@ -448,6 +471,8 @@ metadata:
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
             lowercased_tags: vec![],
+            lowercased_use_when: vec![],
+            lowercased_dont_use_when: vec![],
         };
         assert_eq!(skill.name(), "test");
         assert_eq!(skill.version(), "1.0.0");

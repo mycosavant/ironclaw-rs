@@ -1451,8 +1451,8 @@ impl WasmChannel {
 
                 *self.typing_task.write().await = Some(handle);
             }
-            StatusUpdate::StreamChunk(_) => {
-                // No-op, too noisy
+            StatusUpdate::ToolProgress { .. } | StatusUpdate::StreamChunk(_) => {
+                // No-op, too noisy for typing indicator
             }
             StatusUpdate::ApprovalNeeded {
                 tool_name,
@@ -2200,6 +2200,11 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
                 name,
                 truncate_status_text(preview, 280)
             ),
+            metadata_json,
+        },
+        StatusUpdate::ToolProgress { name, chunk } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Thinking,
+            message: format!("{}: {}", name, truncate_status_text(chunk, 280)),
             metadata_json,
         },
         StatusUpdate::StreamChunk(chunk) => wit_channel::StatusUpdate {

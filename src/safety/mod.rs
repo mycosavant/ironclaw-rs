@@ -207,6 +207,7 @@ mod tests {
         let config = SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: true,
+            http_url_allowlist: None,
         };
         let safety = SafetyLayer::new(&config);
 
@@ -221,6 +222,7 @@ mod tests {
         let config = SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            http_url_allowlist: None,
         };
         let safety = SafetyLayer::new(&config);
 

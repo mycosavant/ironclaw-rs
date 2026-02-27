@@ -518,7 +518,30 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Fetch job context early so we have the real user_id for hooks and rate limiting
-        let job_ctx = deps.context_manager.get_context(job_id).await?;
+        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Wire up a progress channel that forwards tool output chunks to SSE.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::context::progress::ProgressEvent>();
+        job_ctx.progress = crate::context::ProgressSender::new(progress_tx);
+
+        // Spawn a lightweight forwarder: progress events → SSE broadcast
+        let sse_tx = deps.job_event_tx.clone();
+        let fwd_job_id = job_id;
+        let progress_fwd = tokio::spawn(async move {
+            while let Some(evt) = progress_rx.recv().await {
+                if let Some(ref tx) = sse_tx {
+                    let _ = tx.send((
+                        fwd_job_id,
+                        crate::channels::web::types::SseEvent::ToolProgress {
+                            name: evt.tool_name,
+                            chunk: evt.chunk,
+                            thread_id: None,
+                        },
+                    ));
+                }
+            }
+        });
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
         if let Some(config) = tool.rate_limit_config()
@@ -611,6 +634,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         })
         .await;
         let elapsed = start.elapsed();
+
+        // Drop the job context to close the progress sender, allowing the
+        // forwarder task to drain remaining events and terminate.
+        drop(job_ctx);
+        let _ = progress_fwd.await;
 
         match &result {
             Ok(Ok(output)) => {
@@ -1153,6 +1181,7 @@ mod tests {
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
+                http_url_allowlist: None,
             })),
             tools: Arc::new(registry),
             store: None,

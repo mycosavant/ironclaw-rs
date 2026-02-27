@@ -479,6 +479,11 @@ impl Channel for ReplChannel {
                 let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
                 eprintln!("    \x1b[90m{display}\x1b[0m");
             }
+            StatusUpdate::ToolProgress { name: _, chunk } => {
+                let display = truncate_for_preview(&chunk, CLI_TOOL_RESULT_MAX);
+                eprint!("    \x1b[90m{display}\x1b[0m");
+                let _ = io::stderr().flush();
+            }
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition
                 if !self.is_streaming.swap(true, Ordering::Relaxed) {

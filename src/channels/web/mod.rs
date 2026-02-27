@@ -340,6 +340,11 @@ impl Channel for GatewayChannel {
                 preview,
                 thread_id: thread_id.clone(),
             },
+            StatusUpdate::ToolProgress { name, chunk } => SseEvent::ToolProgress {
+                name,
+                chunk,
+                thread_id: thread_id.clone(),
+            },
             StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
                 content,
                 thread_id: thread_id.clone(),

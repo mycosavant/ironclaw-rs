@@ -77,6 +77,7 @@ impl WorkerRuntime {
         let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: true,
+            http_url_allowlist: None,
         }));
 
         let tools = Arc::new(ToolRegistry::new());

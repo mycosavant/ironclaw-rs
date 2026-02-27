@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +30,8 @@ pub struct HttpTool {
     client: Client,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Optional domain allowlist. When set, only requests to listed domains are permitted.
+    url_allowlist: Option<crate::sandbox::proxy::allowlist::DomainAllowlist>,
 }
 
 impl HttpTool {
@@ -50,6 +52,7 @@ impl HttpTool {
             client,
             credential_registry: None,
             secrets_store: None,
+            url_allowlist: None,
         }
     }
 
@@ -63,9 +66,24 @@ impl HttpTool {
         self.secrets_store = Some(secrets_store);
         self
     }
+
+    /// Attach a domain allowlist to restrict which hosts the tool can reach.
+    pub fn with_url_allowlist(
+        mut self,
+        allowlist: crate::sandbox::proxy::allowlist::DomainAllowlist,
+    ) -> Self {
+        self.url_allowlist = Some(allowlist);
+        self
+    }
 }
 
-fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
+/// Validate a URL for SSRF safety and resolve its hostname asynchronously.
+///
+/// Returns the parsed URL and the resolved socket addresses. The caller
+/// should pin these addresses into the `reqwest::Client` via
+/// `resolve_to_addrs()` to close the TOCTOU window between validation
+/// and connection (DNS rebinding defense).
+async fn validate_url(url: &str) -> Result<(reqwest::Url, Vec<SocketAddr>), ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 
@@ -95,23 +113,34 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         ));
     }
 
-    // Resolve hostname and check all resolved IPs against the blocklist.
+    // Async DNS resolution — does not block the Tokio worker thread.
     // This prevents DNS rebinding where a hostname resolves to a private IP.
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let socket_addr = format!("{}:{}", host, port);
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            if is_disallowed_ip(&addr.ip()) {
-                return Err(ToolError::NotAuthorized(format!(
-                    "hostname '{}' resolves to disallowed IP {}",
-                    host,
-                    addr.ip()
-                )));
-            }
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.to_string(), port))
+        .await
+        .map_err(|e| {
+            ToolError::NotAuthorized(format!("DNS resolution failed for '{}': {}", host, e))
+        })?
+        .collect();
+
+    if resolved.is_empty() {
+        return Err(ToolError::NotAuthorized(format!(
+            "DNS resolution returned no addresses for '{}'",
+            host
+        )));
+    }
+
+    for addr in &resolved {
+        if is_disallowed_ip(&addr.ip()) {
+            return Err(ToolError::NotAuthorized(format!(
+                "hostname '{}' resolves to disallowed IP {}",
+                host,
+                addr.ip()
+            )));
         }
     }
 
-    Ok(parsed)
+    Ok((parsed, resolved))
 }
 
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
@@ -314,18 +343,51 @@ impl Tool for HttpTool {
         let method = require_str(&params, "method")?;
 
         let url = require_str(&params, "url")?;
-        let mut parsed_url = validate_url(url)?;
+        let (mut parsed_url, resolved_addrs) = validate_url(url).await?;
+
+        // Check domain allowlist (if configured)
+        if let Some(ref allowlist) = self.url_allowlist
+            && let Some(host) = parsed_url.host_str()
+        {
+            let result = allowlist.is_allowed(host);
+            if !result.is_allowed() {
+                return Err(ToolError::NotAuthorized(format!(
+                    "domain '{}' not in URL allowlist",
+                    host
+                )));
+            }
+        }
 
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
+        // Pin the validated DNS addresses into a per-request client so that
+        // reqwest connects to the exact IPs we checked, closing the TOCTOU
+        // window that would allow DNS rebinding between validation and connect.
+        let pinned_client = if let Some(host) = parsed_url.host_str() {
+            Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(host, &resolved_addrs)
+                .build()
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to build pinned HTTP client, DNS rebinding protection degraded: {}",
+                        e
+                    );
+                    self.client.clone()
+                })
+        } else {
+            self.client.clone()
+        };
+
         // Build request
         let mut request = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(parsed_url.clone()),
-            "POST" => self.client.post(parsed_url.clone()),
-            "PUT" => self.client.put(parsed_url.clone()),
-            "DELETE" => self.client.delete(parsed_url.clone()),
-            "PATCH" => self.client.patch(parsed_url.clone()),
+            "GET" => pinned_client.get(parsed_url.clone()),
+            "POST" => pinned_client.post(parsed_url.clone()),
+            "PUT" => pinned_client.put(parsed_url.clone()),
+            "DELETE" => pinned_client.delete(parsed_url.clone()),
+            "PATCH" => pinned_client.patch(parsed_url.clone()),
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unsupported method: {}",
@@ -535,39 +597,42 @@ mod tests {
         assert_eq!(schema["properties"]["headers"]["type"], "array");
     }
 
-    #[test]
-    fn test_validate_url_rejects_http() {
-        let err = validate_url("http://example.com").unwrap_err();
+    #[tokio::test]
+    async fn test_validate_url_rejects_http() {
+        let err = validate_url("http://example.com").await.unwrap_err();
         assert!(err.to_string().contains("https"));
     }
 
-    #[test]
-    fn test_validate_url_rejects_localhost() {
-        let err = validate_url("https://localhost:8080").unwrap_err();
+    #[tokio::test]
+    async fn test_validate_url_rejects_localhost() {
+        let err = validate_url("https://localhost:8080").await.unwrap_err();
         assert!(err.to_string().contains("localhost"));
     }
 
-    #[test]
-    fn test_validate_url_accepts_https_public() {
-        let url = validate_url("https://example.com").unwrap();
+    #[tokio::test]
+    async fn test_validate_url_accepts_https_public() {
+        let (url, addrs) = validate_url("https://example.com").await.unwrap();
         assert_eq!(url.host_str(), Some("example.com"));
+        assert!(!addrs.is_empty(), "should resolve to at least one address");
     }
 
-    #[test]
-    fn test_validate_url_rejects_private_ip_literal() {
-        let err = validate_url("https://192.168.1.1/api").unwrap_err();
+    #[tokio::test]
+    async fn test_validate_url_rejects_private_ip_literal() {
+        let err = validate_url("https://192.168.1.1/api").await.unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
-    #[test]
-    fn test_validate_url_rejects_loopback_ip() {
-        let err = validate_url("https://127.0.0.1/api").unwrap_err();
+    #[tokio::test]
+    async fn test_validate_url_rejects_loopback_ip() {
+        let err = validate_url("https://127.0.0.1/api").await.unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
-    #[test]
-    fn test_validate_url_rejects_link_local() {
-        let err = validate_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
+    #[tokio::test]
+    async fn test_validate_url_rejects_link_local() {
+        let err = validate_url("https://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
@@ -930,5 +995,39 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    // ── URL allowlist tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_url_allowlist_blocks_unlisted_domain() {
+        use crate::sandbox::proxy::allowlist::DomainAllowlist;
+
+        let allowlist = DomainAllowlist::new(&["api.github.com".to_string()]);
+        let tool = HttpTool::new().with_url_allowlist(allowlist);
+
+        assert!(tool.url_allowlist.is_some());
+        // Verify that a non-listed domain would be rejected by the allowlist
+        let al = tool.url_allowlist.as_ref().unwrap();
+        assert!(!al.is_allowed("evil.com").is_allowed());
+    }
+
+    #[test]
+    fn test_url_allowlist_allows_listed_domain() {
+        use crate::sandbox::proxy::allowlist::DomainAllowlist;
+
+        let allowlist =
+            DomainAllowlist::new(&["api.github.com".to_string(), "*.openai.com".to_string()]);
+        let tool = HttpTool::new().with_url_allowlist(allowlist);
+
+        let al = tool.url_allowlist.as_ref().unwrap();
+        assert!(al.is_allowed("api.github.com").is_allowed());
+        assert!(al.is_allowed("api.openai.com").is_allowed());
+    }
+
+    #[test]
+    fn test_no_url_allowlist_allows_everything() {
+        let tool = HttpTool::new();
+        assert!(tool.url_allowlist.is_none());
     }
 }

@@ -273,6 +273,7 @@ impl TestHarnessBuilder {
         let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            http_url_allowlist: None,
         }));
 
         let hooks = Arc::new(HookRegistry::new());

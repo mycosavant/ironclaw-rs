@@ -110,6 +110,8 @@ pub enum StatusUpdate {
     ToolCompleted { name: String, success: bool },
     /// Brief preview of tool execution output.
     ToolResult { name: String, preview: String },
+    /// Incremental progress from a running tool (e.g. stdout lines from shell).
+    ToolProgress { name: String, chunk: String },
     /// Streaming text chunk.
     StreamChunk(String),
     /// General status message.

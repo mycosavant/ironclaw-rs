@@ -212,37 +212,71 @@ impl Agent {
         // Natural language goes through the agentic loop
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
-        // Auto-compact if needed BEFORE adding new turn
-        {
-            let mut sess = session.lock().await;
+        // Auto-compact if needed BEFORE adding new turn.
+        //
+        // The compaction phases are split so the session mutex is NOT held
+        // across the LLM summarization call (which can take several seconds).
+        // Phase 1: read under lock, Phase 2: expensive I/O without lock,
+        // Phase 3: write back under lock.
+        let compaction_needed = {
+            let sess = session.lock().await;
             let thread = sess
                 .threads
-                .get_mut(&thread_id)
+                .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             let messages = thread.messages();
-            if let Some(strategy) = self.context_monitor.suggest_compaction(&messages) {
-                let pct = self.context_monitor.usage_percent(&messages);
-                tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
+            self.context_monitor
+                .suggest_compaction(&messages)
+                .map(|strategy| {
+                    let pct = self.context_monitor.usage_percent(&messages);
+                    (thread.clone(), strategy, pct)
+                })
+        };
 
-                // Notify the user that compaction is happening
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status(format!(
-                            "Context at {:.0}% capacity, compacting...",
-                            pct
-                        )),
-                        &message.metadata,
-                    )
-                    .await;
+        if let Some((mut thread_clone, strategy, pct)) = compaction_needed {
+            tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
-                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
-                if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
-                    .await
-                {
+            // Notify the user that compaction is happening (no lock needed)
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(format!("Context at {:.0}% capacity, compacting...", pct)),
+                    &message.metadata,
+                )
+                .await;
+
+            // Load workspace identity context (no lock needed)
+            let identity_context = if let Some(ws) = self.workspace() {
+                match ws.system_prompt().await {
+                    Ok(ctx) if !ctx.is_empty() => Some(ctx),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Run the LLM summarization on the cloned thread (no lock needed)
+            let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+            match compactor
+                .compact(
+                    &mut thread_clone,
+                    strategy,
+                    self.workspace().map(|w| w.as_ref()),
+                    identity_context.as_deref(),
+                )
+                .await
+            {
+                Ok(_) => {
+                    // Phase 3: write compacted turns back under lock
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.turns = thread_clone.turns;
+                        thread.updated_at = thread_clone.updated_at;
+                    }
+                }
+                Err(e) => {
                     tracing::warn!("Auto-compaction failed: {}", e);
                 }
             }
@@ -297,152 +331,159 @@ impl Agent {
             .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
             .await;
 
-        // Re-acquire lock and check if interrupted
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        // Re-acquire lock for thread mutations. The lock is released before any
+        // DB persistence (persist_assistant_response) to avoid holding the session
+        // mutex across async I/O — the same pattern used in handle_auth_intercept
+        // and the compaction sites.
+        let (submission_result, persist_text) = {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        // Complete, fail, or request approval
-        match result {
-            Ok(AgenticLoopResult::Interrupted { partial }) => {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Interrupted".into()),
-                        &message.metadata,
-                    )
-                    .await;
+            // Complete, fail, or request approval
+            match result {
+                Ok(AgenticLoopResult::Interrupted { partial }) => {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Interrupted".into()),
+                            &message.metadata,
+                        )
+                        .await;
 
-                // If there's partial output, emit it so the user can see what
-                // was generated before the interrupt.
-                if let Some(ref content) = partial {
-                    thread.complete_turn(format!("{}\n\n[interrupted]", content));
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.user_id,
-                        &format!("{}\n\n[interrupted]", content),
-                    )
-                    .await;
-                    return Ok(SubmissionResult::response(format!(
-                        "{}\n\n[interrupted]",
-                        content
-                    )));
+                    // If there's partial output, emit it so the user can see what
+                    // was generated before the interrupt.
+                    if let Some(ref content) = partial {
+                        let msg = format!("{}\n\n[interrupted]", content);
+                        thread.complete_turn(&msg);
+                        (Ok(SubmissionResult::response(msg.clone())), Some(msg))
+                    } else {
+                        thread.interrupt();
+                        (Ok(SubmissionResult::Interrupted), None)
+                    }
                 }
-
-                thread.interrupt();
-                Ok(SubmissionResult::Interrupted)
-            }
-            _ if thread.state == ThreadState::Interrupted => {
-                // Fallback: loop returned an error but thread was marked interrupted.
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Interrupted".into()),
-                        &message.metadata,
-                    )
-                    .await;
-                Ok(SubmissionResult::Interrupted)
-            }
-            Ok(AgenticLoopResult::Response {
-                text: response,
-                had_high_severity,
-            }) => {
-                // Hook: TransformResponse — allow hooks to modify or reject the final response
-                let response = {
-                    let event = crate::hooks::HookEvent::ResponseTransform {
-                        user_id: message.user_id.clone(),
-                        thread_id: thread_id.to_string(),
-                        response: response.clone(),
+                _ if thread.state == ThreadState::Interrupted => {
+                    // Fallback: loop returned an error but thread was marked interrupted.
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Interrupted".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                    (Ok(SubmissionResult::Interrupted), None)
+                }
+                Ok(AgenticLoopResult::Response {
+                    text: response,
+                    had_high_severity,
+                }) => {
+                    // Hook: TransformResponse — allow hooks to modify or reject the final response
+                    let response = {
+                        let event = crate::hooks::HookEvent::ResponseTransform {
+                            user_id: message.user_id.clone(),
+                            thread_id: thread_id.to_string(),
+                            response: response.clone(),
+                        };
+                        match self.hooks().run(&event).await {
+                            Err(crate::hooks::HookError::Rejected { reason }) => {
+                                format!("[Response filtered: {}]", reason)
+                            }
+                            Err(err) => {
+                                format!("[Response blocked by hook policy: {}]", err)
+                            }
+                            Ok(crate::hooks::HookOutcome::Continue {
+                                modified: Some(new_response),
+                            }) => new_response,
+                            _ => response, // fail-open: use original
+                        }
                     };
-                    match self.hooks().run(&event).await {
-                        Err(crate::hooks::HookError::Rejected { reason }) => {
-                            format!("[Response filtered: {}]", reason)
+
+                    // Update the injection circuit breaker and append a warning
+                    // if quarantine was just triggered for the first time.
+                    let quarantine_triggered = {
+                        let had = had_high_severity;
+                        if had {
+                            thread
+                                .injection_counter
+                                .record_warning_severity(&crate::safety::Severity::High);
                         }
-                        Err(err) => {
-                            format!("[Response blocked by hook policy: {}]", err)
-                        }
-                        Ok(crate::hooks::HookOutcome::Continue {
-                            modified: Some(new_response),
-                        }) => new_response,
-                        _ => response, // fail-open: use original
-                    }
-                };
+                        thread.injection_counter.end_turn()
+                    };
 
-                // Update the injection circuit breaker and append a warning
-                // if quarantine was just triggered for the first time.
-                let quarantine_triggered = {
-                    let had = had_high_severity;
-                    if had {
-                        thread
-                            .injection_counter
-                            .record_warning_severity(&crate::safety::Severity::High);
-                    }
-                    thread.injection_counter.end_turn()
-                };
+                    thread.complete_turn(&response);
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Done".into()),
+                            &message.metadata,
+                        )
+                        .await;
 
-                thread.complete_turn(&response);
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Done".into()),
-                        &message.metadata,
-                    )
-                    .await;
+                    let result = if quarantine_triggered {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Injection circuit breaker triggered: entering quarantine"
+                        );
+                        // Append the quarantine notice after the normal response so the user
+                        // sees both the completed turn and the safety escalation.
+                        let notice = format!(
+                            "{}\n\n---\n{}",
+                            response,
+                            crate::agent::quarantine::QUARANTINE_NOTICE
+                        );
+                        Ok(SubmissionResult::response(notice))
+                    } else {
+                        Ok(SubmissionResult::response(response.clone()))
+                    };
 
-                // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(thread_id, &message.user_id, &response)
-                    .await;
-
-                if quarantine_triggered {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        "Injection circuit breaker triggered: entering quarantine"
-                    );
-                    // Append the quarantine notice after the normal response so the user
-                    // sees both the completed turn and the safety escalation.
-                    let notice = format!(
-                        "{}\n\n---\n{}",
-                        response,
-                        crate::agent::quarantine::QUARANTINE_NOTICE
-                    );
-                    return Ok(SubmissionResult::response(notice));
+                    (result, Some(response))
                 }
-
-                Ok(SubmissionResult::response(response))
-            }
-            Ok(AgenticLoopResult::NeedApproval { pending }) => {
-                // Store pending approval in thread and update state
-                let request_id = pending.request_id;
-                let tool_name = pending.tool_name.clone();
-                let description = pending.description.clone();
-                let parameters = pending.parameters.clone();
-                thread.await_approval(pending);
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
-                        &message.metadata,
+                Ok(AgenticLoopResult::NeedApproval { pending }) => {
+                    // Store pending approval in thread and update state
+                    let request_id = pending.request_id;
+                    let tool_name = pending.tool_name.clone();
+                    let description = pending.description.clone();
+                    let parameters = pending.parameters.clone();
+                    thread.await_approval(pending);
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Awaiting approval".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                    (
+                        Ok(SubmissionResult::NeedApproval {
+                            request_id,
+                            tool_name,
+                            description,
+                            parameters,
+                        }),
+                        None,
                     )
-                    .await;
-                Ok(SubmissionResult::NeedApproval {
-                    request_id,
-                    tool_name,
-                    description,
-                    parameters,
-                })
+                }
+                Err(e) => {
+                    thread.fail_turn(e.to_string());
+                    // User message already persisted at turn start; nothing else to save
+                    (Ok(SubmissionResult::error(e.to_string())), None)
+                }
             }
-            Err(e) => {
-                thread.fail_turn(e.to_string());
-                // User message already persisted at turn start; nothing else to save
-                Ok(SubmissionResult::error(e.to_string()))
-            }
+        }; // Lock released before DB write
+
+        // Persist assistant response outside the lock (user message already
+        // persisted at turn start).
+        if let Some(ref response) = persist_text {
+            self.persist_assistant_response(thread_id, &message.user_id, response)
+                .await;
         }
+
+        submission_result
     }
 
     /// Persist the user message to the DB at turn start (before the agentic loop).
@@ -663,27 +704,55 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        // Phase 1: read thread data and compute strategy under lock
+        let (mut thread_clone, usage, strategy) = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        let messages = thread.messages();
-        let usage = self.context_monitor.usage_percent(&messages);
-        let strategy = self
-            .context_monitor
-            .suggest_compaction(&messages)
-            .unwrap_or(
-                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-            );
+            let messages = thread.messages();
+            let usage = self.context_monitor.usage_percent(&messages);
+            let strategy = self
+                .context_monitor
+                .suggest_compaction(&messages)
+                .unwrap_or(
+                    crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+                );
+            (thread.clone(), usage, strategy)
+        }; // Lock released before any async I/O
+
+        // Phase 2: expensive I/O without the session lock
+        let identity_context = if let Some(ws) = self.workspace() {
+            match ws.system_prompt().await {
+                Ok(ctx) if !ctx.is_empty() => Some(ctx),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
         match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+            .compact(
+                &mut thread_clone,
+                strategy,
+                self.workspace().map(|w| w.as_ref()),
+                identity_context.as_deref(),
+            )
             .await
         {
             Ok(result) => {
+                // Phase 3: write compacted turns back under lock
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.turns = thread_clone.turns;
+                        thread.updated_at = thread_clone.updated_at;
+                    }
+                }
+
                 let mut msg = format!(
                     "Compacted: {} turns removed, {} → {} tokens (was {:.1}% full)",
                     result.turns_removed, result.tokens_before, result.tokens_after, usage
@@ -1190,112 +1259,117 @@ impl Agent {
                 .run_agentic_loop(message, session.clone(), thread_id, context_messages)
                 .await;
 
-            // Handle the result
-            let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            // Handle the result. Thread mutations happen under lock; DB persistence
+            // (persist_assistant_response) runs after the lock is released.
+            let (submission_result, persist_text) = {
+                let mut sess = session.lock().await;
+                let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                    Error::from(crate::error::JobError::NotFound { id: thread_id })
+                })?;
 
-            match result {
-                Ok(AgenticLoopResult::Response {
-                    text: response,
-                    had_high_severity,
-                }) => {
-                    // Update injection circuit breaker (merge warnings from both
-                    // the local approval-tool execution and the agentic loop).
-                    let quarantine_triggered = {
-                        let any_high = had_high_severity || had_high_approval;
-                        if any_high {
-                            thread
-                                .injection_counter
-                                .record_warning_severity(&crate::safety::Severity::High);
+                match result {
+                    Ok(AgenticLoopResult::Response {
+                        text: response,
+                        had_high_severity,
+                    }) => {
+                        // Update injection circuit breaker (merge warnings from both
+                        // the local approval-tool execution and the agentic loop).
+                        let quarantine_triggered = {
+                            let any_high = had_high_severity || had_high_approval;
+                            if any_high {
+                                thread
+                                    .injection_counter
+                                    .record_warning_severity(&crate::safety::Severity::High);
+                            }
+                            thread.injection_counter.end_turn()
+                        };
+
+                        thread.complete_turn(&response);
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Done".into()),
+                                &message.metadata,
+                            )
+                            .await;
+
+                        let result = if quarantine_triggered {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                "Injection circuit breaker triggered: entering quarantine"
+                            );
+                            let notice = format!(
+                                "{}\n\n---\n{}",
+                                response,
+                                crate::agent::quarantine::QUARANTINE_NOTICE
+                            );
+                            Ok(SubmissionResult::response(notice))
+                        } else {
+                            Ok(SubmissionResult::response(response.clone()))
+                        };
+
+                        (result, Some(response))
+                    }
+                    Ok(AgenticLoopResult::NeedApproval {
+                        pending: new_pending,
+                    }) => {
+                        let request_id = new_pending.request_id;
+                        let tool_name = new_pending.tool_name.clone();
+                        let description = new_pending.description.clone();
+                        let parameters = new_pending.parameters.clone();
+                        thread.await_approval(new_pending);
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Awaiting approval".into()),
+                                &message.metadata,
+                            )
+                            .await;
+                        (
+                            Ok(SubmissionResult::NeedApproval {
+                                request_id,
+                                tool_name,
+                                description,
+                                parameters,
+                            }),
+                            None,
+                        )
+                    }
+                    Err(e) => {
+                        thread.fail_turn(e.to_string());
+                        // User message already persisted at turn start
+                        (Ok(SubmissionResult::error(e.to_string())), None)
+                    }
+                    Ok(AgenticLoopResult::Interrupted { partial }) => {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Interrupted".into()),
+                                &message.metadata,
+                            )
+                            .await;
+                        if let Some(content) = partial {
+                            let msg = format!("{}\n\n[interrupted]", content);
+                            thread.complete_turn(&msg);
+                            (Ok(SubmissionResult::response(msg.clone())), Some(msg))
+                        } else {
+                            thread.interrupt();
+                            (Ok(SubmissionResult::Interrupted), None)
                         }
-                        thread.injection_counter.end_turn()
-                    };
-
-                    thread.complete_turn(&response);
-                    // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(thread_id, &message.user_id, &response)
-                        .await;
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Done".into()),
-                            &message.metadata,
-                        )
-                        .await;
-
-                    if quarantine_triggered {
-                        tracing::warn!(
-                            thread_id = %thread_id,
-                            "Injection circuit breaker triggered: entering quarantine"
-                        );
-                        let notice = format!(
-                            "{}\n\n---\n{}",
-                            response,
-                            crate::agent::quarantine::QUARANTINE_NOTICE
-                        );
-                        return Ok(SubmissionResult::response(notice));
                     }
+                }
+            }; // Lock released before DB write
 
-                    Ok(SubmissionResult::response(response))
-                }
-                Ok(AgenticLoopResult::NeedApproval {
-                    pending: new_pending,
-                }) => {
-                    let request_id = new_pending.request_id;
-                    let tool_name = new_pending.tool_name.clone();
-                    let description = new_pending.description.clone();
-                    let parameters = new_pending.parameters.clone();
-                    thread.await_approval(new_pending);
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Awaiting approval".into()),
-                            &message.metadata,
-                        )
-                        .await;
-                    Ok(SubmissionResult::NeedApproval {
-                        request_id,
-                        tool_name,
-                        description,
-                        parameters,
-                    })
-                }
-                Err(e) => {
-                    thread.fail_turn(e.to_string());
-                    // User message already persisted at turn start
-                    Ok(SubmissionResult::error(e.to_string()))
-                }
-                Ok(AgenticLoopResult::Interrupted { partial }) => {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Interrupted".into()),
-                            &message.metadata,
-                        )
-                        .await;
-                    if let Some(content) = partial {
-                        thread.complete_turn(format!("{}\n\n[interrupted]", content));
-                        self.persist_assistant_response(
-                            thread_id,
-                            &message.user_id,
-                            &format!("{}\n\n[interrupted]", content),
-                        )
-                        .await;
-                        return Ok(SubmissionResult::response(format!(
-                            "{}\n\n[interrupted]",
-                            content
-                        )));
-                    }
-                    thread.interrupt();
-                    Ok(SubmissionResult::Interrupted)
-                }
+            // Persist assistant response outside the lock
+            if let Some(ref response) = persist_text {
+                self.persist_assistant_response(thread_id, &message.user_id, response)
+                    .await;
             }
+
+            submission_result
         } else {
             // Rejected - complete the turn with a rejection message and persist
             let rejection = format!(
@@ -1308,11 +1382,11 @@ impl Agent {
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, &message.user_id, &rejection)
-                        .await;
                 }
             }
+            // DB persistence outside the lock (same pattern as handle_auth_intercept)
+            self.persist_assistant_response(thread_id, &message.user_id, &rejection)
+                .await;
 
             let _ = self
                 .channels
@@ -1342,16 +1416,17 @@ impl Agent {
         instructions: String,
     ) {
         let auth_data = parse_auth_result(tool_result);
+        // Mutate thread state under lock, then release before DB write
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(thread_id, &message.user_id, &instructions)
-                    .await;
             }
         }
+        // DB persistence outside the lock (no session state needed)
+        self.persist_assistant_response(thread_id, &message.user_id, &instructions)
+            .await;
         let _ = self
             .channels
             .send_status(

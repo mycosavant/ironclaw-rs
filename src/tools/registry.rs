@@ -89,6 +89,8 @@ pub struct ToolRegistry {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Optional URL allowlist for the HTTP tool.
+    http_url_allowlist: Option<Vec<String>>,
 }
 
 impl ToolRegistry {
@@ -100,7 +102,14 @@ impl ToolRegistry {
             credential_registry: None,
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
+            http_url_allowlist: None,
         }
+    }
+
+    /// Set an optional URL allowlist for the HTTP tool.
+    pub fn with_http_url_allowlist(mut self, allowlist: Option<Vec<String>>) -> Self {
+        self.http_url_allowlist = allowlist;
+        self
     }
 
     /// Create a registry with credential injection support.
@@ -220,6 +229,11 @@ impl ToolRegistry {
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
+        }
+        if let Some(ref domains) = self.http_url_allowlist {
+            http = http.with_url_allowlist(crate::sandbox::proxy::allowlist::DomainAllowlist::new(
+                domains,
+            ));
         }
         self.register_sync(Arc::new(http));
 

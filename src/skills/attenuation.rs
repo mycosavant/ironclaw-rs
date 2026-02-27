@@ -143,6 +143,8 @@ mod tests {
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
             lowercased_tags: vec![],
+            lowercased_use_when: vec![],
+            lowercased_dont_use_when: vec![],
         }
     }
 

@@ -16,6 +16,19 @@ pub fn floor_char_boundary(s: &str, pos: usize) -> usize {
     i
 }
 
+/// Compact a file path by replacing the user's home directory with `~`.
+///
+/// Returns the original path as a string if the home directory cannot be
+/// determined or the path doesn't start with it.
+pub fn compact_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(suffix) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", suffix.display());
+    }
+    path.display().to_string()
+}
+
 /// Check if an LLM response explicitly signals that a job/task is complete.
 ///
 /// Uses phrase-level matching to avoid false positives from bare words like
@@ -72,7 +85,7 @@ pub fn llm_signals_completion(response: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::util::{floor_char_boundary, llm_signals_completion};
+    use crate::util::{compact_path, floor_char_boundary, llm_signals_completion};
 
     // ── floor_char_boundary ──
 
@@ -174,5 +187,23 @@ mod tests {
         assert!(!llm_signals_completion(
             "The tool returned: TASK_COMPLETE signal"
         ));
+    }
+
+    // ── compact_path ──
+
+    #[test]
+    fn compact_path_replaces_home() {
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join("projects").join("my-app");
+            let result = compact_path(&path);
+            assert_eq!(result, "~/projects/my-app");
+        }
+    }
+
+    #[test]
+    fn compact_path_leaves_non_home_paths() {
+        let path = std::path::PathBuf::from("/tmp/some-file");
+        let result = compact_path(&path);
+        assert_eq!(result, "/tmp/some-file");
     }
 }

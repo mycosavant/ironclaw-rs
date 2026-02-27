@@ -154,6 +154,12 @@ pub struct JobContext {
     /// prefixes and cannot write any memory at all.
     #[serde(skip)]
     pub active_skill_trust: Option<crate::skills::SkillTrust>,
+    /// Channel for streaming incremental tool progress (e.g., shell stdout lines).
+    ///
+    /// Tools call `self.progress.send("tool_name", chunk)` to emit real-time
+    /// output.  The default is a no-op sender that silently discards events.
+    #[serde(skip)]
+    pub progress: crate::context::progress::ProgressSender,
 }
 
 impl JobContext {
@@ -192,6 +198,7 @@ impl JobContext {
             extra_env: Arc::new(HashMap::new()),
             metadata: serde_json::Value::Null,
             active_skill_trust: None,
+            progress: crate::context::progress::ProgressSender::noop(),
         }
     }
 

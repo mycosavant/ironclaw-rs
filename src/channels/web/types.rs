@@ -28,6 +28,10 @@ pub struct ThreadInfo {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_type: Option<String>,
+    /// Estimated token count for the thread's context.
+    pub token_estimate: usize,
+    /// Total number of messages (user + assistant + tool + system).
+    pub message_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +114,14 @@ pub enum SseEvent {
     ToolResult {
         name: String,
         preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    /// Incremental progress from a running tool (e.g. stdout lines from shell).
+    #[serde(rename = "tool_progress")]
+    ToolProgress {
+        name: String,
+        chunk: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -600,6 +612,7 @@ impl WsServerMessage {
             SseEvent::ToolStarted { .. } => "tool_started",
             SseEvent::ToolCompleted { .. } => "tool_completed",
             SseEvent::ToolResult { .. } => "tool_result",
+            SseEvent::ToolProgress { .. } => "tool_progress",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
             SseEvent::JobStarted { .. } => "job_started",

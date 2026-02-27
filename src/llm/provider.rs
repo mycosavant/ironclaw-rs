@@ -1,6 +1,9 @@
 //! LLM provider trait and types.
 
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::Stream;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -271,6 +274,28 @@ pub enum FinishReason {
     Unknown,
 }
 
+/// A chunk from a streaming LLM response.
+#[derive(Debug, Clone)]
+pub enum CompletionChunk {
+    /// Incremental text content.
+    ContentDelta(String),
+    /// Reasoning/thinking content delta.
+    ReasoningDelta(String),
+    /// A tool call is being streamed (incremental arguments).
+    ToolCallDelta {
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
+    },
+    /// Stream is done; final usage stats.
+    Done {
+        input_tokens: u32,
+        output_tokens: u32,
+        finish_reason: FinishReason,
+    },
+}
+
 /// Definition of a tool for the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -429,6 +454,25 @@ pub trait LlmProvider: Send + Sync {
             provider: "unknown".to_string(),
             reason: "Runtime model switching not supported by this provider".to_string(),
         })
+    }
+
+    /// Stream a completion response. Default falls back to buffered
+    /// `complete()` and yields the result as a single chunk.
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<CompletionChunk, LlmError>> + Send>>, LlmError>
+    {
+        let response = self.complete(request).await?;
+        let chunks = vec![
+            Ok(CompletionChunk::ContentDelta(response.content)),
+            Ok(CompletionChunk::Done {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                finish_reason: response.finish_reason,
+            }),
+        ];
+        Ok(Box::pin(futures::stream::iter(chunks)))
     }
 
     /// Calculate cost for a completion.

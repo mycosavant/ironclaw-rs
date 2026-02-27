@@ -8,8 +8,10 @@
 
 mod manager;
 mod memory;
+pub mod progress;
 mod state;
 
 pub use manager::ContextManager;
 pub use memory::{ActionRecord, ConversationMemory, Memory};
+pub use progress::ProgressSender;
 pub use state::{JobContext, JobState, StateTransition};

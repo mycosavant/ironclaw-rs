@@ -241,6 +241,7 @@ impl Store {
                     max_tokens: 0,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                     active_skill_trust: None,
+                    progress: crate::context::progress::ProgressSender::noop(),
                 }))
             }
             None => Ok(None),

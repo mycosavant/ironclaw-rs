@@ -510,6 +510,11 @@ pub struct SafetySettings {
     /// Whether injection check is enabled.
     #[serde(default = "default_true")]
     pub injection_check_enabled: bool,
+
+    /// Optional domain allowlist for the HTTP tool.
+    /// When set, only requests to listed domains are permitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_url_allowlist: Option<Vec<String>>,
 }
 
 fn default_max_output_length() -> usize {
@@ -521,6 +526,7 @@ impl Default for SafetySettings {
         Self {
             max_output_length: default_max_output_length(),
             injection_check_enabled: true,
+            http_url_allowlist: None,
         }
     }
 }

@@ -473,6 +473,8 @@ pub async fn chat_threads_handler(
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
+                    token_estimate: 0,
+                    message_count: s.message_count.max(0) as usize,
                 };
 
                 if s.id == assistant_id {
@@ -492,6 +494,8 @@ pub async fn chat_threads_handler(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     title: None,
                     thread_type: Some("assistant".to_string()),
+                    token_estimate: 0,
+                    message_count: 0,
                 });
             }
 
@@ -507,14 +511,20 @@ pub async fn chat_threads_handler(
     let threads: Vec<ThreadInfo> = sess
         .threads
         .values()
-        .map(|t| ThreadInfo {
-            id: t.id,
-            state: format!("{:?}", t.state),
-            turn_count: t.turns.len(),
-            created_at: t.created_at.to_rfc3339(),
-            updated_at: t.updated_at.to_rfc3339(),
-            title: None,
-            thread_type: None,
+        .map(|t| {
+            let messages = t.messages();
+            let breakdown = crate::agent::context_monitor::ContextBreakdown::analyze(&messages);
+            ThreadInfo {
+                id: t.id,
+                state: format!("{:?}", t.state),
+                turn_count: t.turns.len(),
+                created_at: t.created_at.to_rfc3339(),
+                updated_at: t.updated_at.to_rfc3339(),
+                title: None,
+                thread_type: None,
+                token_estimate: breakdown.total_tokens,
+                message_count: messages.len(),
+            }
         })
         .collect();
 
@@ -545,6 +555,8 @@ pub async fn chat_new_thread_handler(
         updated_at: thread.updated_at.to_rfc3339(),
         title: None,
         thread_type: Some("thread".to_string()),
+        token_estimate: 0,
+        message_count: 0,
     };
 
     // Persist the empty conversation row with thread_type metadata

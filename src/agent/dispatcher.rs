@@ -102,9 +102,18 @@ impl Agent {
                     ""
                 };
 
+                let source_path = match &skill.source {
+                    crate::skills::SkillSource::Workspace(p)
+                    | crate::skills::SkillSource::User(p)
+                    | crate::skills::SkillSource::Bundled(p)
+                    | crate::skills::SkillSource::Installed(p) => {
+                        crate::skills::escape_xml_attr(&crate::util::compact_path(p))
+                    }
+                };
+
                 context_parts.push(format!(
-                    "<skill name=\"{}\" version=\"{}\" trust=\"{}\">\n{}{}\n</skill>",
-                    safe_name, safe_version, trust_label, safe_content, suffix,
+                    "<skill name=\"{}\" version=\"{}\" trust=\"{}\" source=\"{}\">\n{}{}\n</skill>",
+                    safe_name, safe_version, trust_label, source_path, safe_content, suffix,
                 ));
             }
             Some(context_parts.join("\n\n"))
@@ -132,6 +141,29 @@ impl Agent {
         let mut job_ctx =
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
         job_ctx.active_skill_trust = active_skills.iter().map(|s| s.trust).min();
+
+        // Wire up a progress channel that forwards tool output chunks to the channel.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::context::progress::ProgressEvent>();
+        job_ctx.progress = crate::context::ProgressSender::new(progress_tx);
+
+        let progress_channels = self.channels.clone();
+        let progress_channel_id = message.channel.clone();
+        let progress_metadata = message.metadata.clone();
+        let _progress_fwd = tokio::spawn(async move {
+            while let Some(evt) = progress_rx.recv().await {
+                let _ = progress_channels
+                    .send_status(
+                        &progress_channel_id,
+                        StatusUpdate::ToolProgress {
+                            name: evt.tool_name,
+                            chunk: evt.chunk,
+                        },
+                        &progress_metadata,
+                    )
+                    .await;
+            }
+        });
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -907,6 +939,7 @@ mod tests {
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: true,
+                http_url_allowlist: None,
             })),
             tools: Arc::new(ToolRegistry::new()),
             workspace: None,
@@ -1155,6 +1188,7 @@ mod tests {
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            http_url_allowlist: None,
         });
 
         let job_ctx = JobContext::with_user("test", "chat", "test session");
@@ -1184,6 +1218,7 @@ mod tests {
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            http_url_allowlist: None,
         });
         let job_ctx = JobContext::with_user("test", "chat", "test session");
 
