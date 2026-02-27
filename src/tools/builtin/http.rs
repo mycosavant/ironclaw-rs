@@ -370,13 +370,9 @@ impl Tool for HttpTool {
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve_to_addrs(host, &resolved_addrs)
                 .build()
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "Failed to build pinned HTTP client, DNS rebinding protection degraded: {}",
-                        e
-                    );
-                    self.client.clone()
-                })
+                .map_err(|e| {
+                    ToolError::ExternalService(format!("failed to build pinned HTTP client: {}", e))
+                })?
         } else {
             self.client.clone()
         };

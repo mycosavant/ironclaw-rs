@@ -764,7 +764,7 @@ async fn refresh_oauth_token(
         );
         return false;
     }
-    if let Err(reason) = reject_private_ip(&config.token_url) {
+    if let Err(reason) = reject_private_ip_async(&config.token_url).await {
         tracing::warn!(
             token_url = %config.token_url,
             reason = %reason,
@@ -1006,7 +1006,11 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
 /// This prevents DNS rebinding attacks where an attacker's domain resolves to an
 /// internal IP after passing the allowlist check.
-fn reject_private_ip(url: &str) -> Result<(), String> {
+/// Parse a URL and validate its host against private IP ranges.
+///
+/// Returns the parsed host string for callers that need DNS resolution,
+/// or `Ok(())` if the host is a public IP literal.
+fn parse_and_check_ip_literal(url: &str) -> Result<String, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
@@ -1022,34 +1026,27 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
                 .and_then(|v| v.strip_suffix(']'))
                 .unwrap_or(h)
         })
-        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?
+        .to_string();
 
     // If the host is already an IP, check it directly
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
-            Err(format!(
-                "HTTP request to private/internal IP {} is not allowed",
-                ip
-            ))
-        } else {
-            Ok(())
-        };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+        && is_private_ip(ip)
+    {
+        return Err(format!(
+            "HTTP request to private/internal IP {} is not allowed",
+            ip
+        ));
     }
 
-    // Resolve DNS and check all addresses
-    use std::net::ToSocketAddrs;
-    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
-    // doesn't affect which IPs the hostname resolves to.
-    let addrs: Vec<_> = format!("{}:0", host)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
-        .collect();
+    Ok(host)
+}
 
+fn check_resolved_addrs(host: &str, addrs: &[std::net::SocketAddr]) -> Result<(), String> {
     if addrs.is_empty() {
         return Err(format!("DNS resolution returned no addresses for {}", host));
     }
-
-    for addr in &addrs {
+    for addr in addrs {
         if is_private_ip(addr.ip()) {
             return Err(format!(
                 "DNS rebinding detected: {} resolved to private IP {}",
@@ -1058,8 +1055,45 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
             ));
         }
     }
-
     Ok(())
+}
+
+/// Synchronous SSRF check — used inside `spawn_blocking` (execute_sync).
+fn reject_private_ip(url: &str) -> Result<(), String> {
+    let host = parse_and_check_ip_literal(url)?;
+
+    // If the host was an IP literal, parse_and_check_ip_literal already
+    // validated it. Only resolve DNS for hostnames.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    check_resolved_addrs(&host, &addrs)
+}
+
+/// Async SSRF check — used in async contexts (e.g. `refresh_oauth_token`).
+///
+/// Uses `tokio::net::lookup_host` instead of blocking `to_socket_addrs`
+/// to avoid stalling the Tokio runtime.
+async fn reject_private_ip_async(url: &str) -> Result<(), String> {
+    let host = parse_and_check_ip_literal(url)?;
+
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let addrs: Vec<_> = tokio::net::lookup_host(format!("{}:0", host))
+        .await
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    check_resolved_addrs(&host, &addrs)
 }
 
 /// Check if an IP address belongs to a private/internal range.

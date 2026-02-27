@@ -637,32 +637,42 @@ impl ShellTool {
             let stdout_fut = async {
                 if let Some(out) = stdout_handle {
                     if stream_progress {
-                        // Line-by-line streaming: each line is sent as a
-                        // progress event AND accumulated for the final result.
+                        // Chunk-based streaming: reads up to MAX_LINE_SIZE
+                        // bytes at a time, splitting on newlines. This caps
+                        // memory per read to prevent a single newline-free
+                        // stream from growing unbounded.
                         use tokio::io::AsyncBufReadExt;
-                        let mut reader = tokio::io::BufReader::new(out);
+                        const MAX_LINE_SIZE: usize = 64 * 1024; // 64 KB per chunk
+                        let mut reader = tokio::io::BufReader::with_capacity(MAX_LINE_SIZE, out);
                         let mut buf = String::new();
                         let mut total_bytes = 0usize;
                         loop {
-                            let mut line = String::new();
-                            match reader.read_line(&mut line).await {
-                                Ok(0) => break, // EOF
-                                Ok(n) => {
-                                    total_bytes += n;
-                                    if total_bytes <= MAX_OUTPUT_SIZE {
-                                        progress_clone.send("shell", &line);
-                                        buf.push_str(&line);
-                                    } else if total_bytes - n <= MAX_OUTPUT_SIZE {
-                                        // First line that crosses the limit: drain the rest
-                                        // silently so the child doesn't block.
-                                        tokio::io::copy(&mut reader, &mut tokio::io::sink())
-                                            .await
-                                            .ok();
-                                        break;
-                                    }
-                                }
+                            let available = match reader.fill_buf().await {
+                                Ok([]) => break, // EOF
+                                Ok(b) => b,
                                 Err(_) => break,
+                            };
+                            // Take at most MAX_LINE_SIZE, find the last newline
+                            // within the chunk to send complete lines when possible.
+                            let chunk_len = available.len().min(MAX_LINE_SIZE);
+                            let chunk = &available[..chunk_len];
+                            let consume_len = chunk_len;
+
+                            total_bytes += consume_len;
+                            if total_bytes <= MAX_OUTPUT_SIZE {
+                                let text = String::from_utf8_lossy(chunk);
+                                progress_clone.send("shell", text.as_ref());
+                                buf.push_str(&text);
+                            } else if total_bytes - consume_len <= MAX_OUTPUT_SIZE {
+                                // First chunk that crosses the limit: drain the rest
+                                // silently so the child doesn't block.
+                                reader.consume(consume_len);
+                                tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                                    .await
+                                    .ok();
+                                break;
                             }
+                            reader.consume(consume_len);
                         }
                         buf
                     } else {

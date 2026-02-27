@@ -274,6 +274,11 @@ impl Agent {
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.turns = thread_clone.turns;
                         thread.updated_at = thread_clone.updated_at;
+                    } else {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Thread removed during auto-compaction — discarding result"
+                        );
                     }
                 }
                 Err(e) => {
@@ -331,10 +336,42 @@ impl Agent {
             .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
             .await;
 
+        // Run TransformResponse hook OUTSIDE the session lock. Hooks can be
+        // arbitrary async code (webhooks, timeouts) and must not block the
+        // session mutex.
+        let result = match result {
+            Ok(AgenticLoopResult::Response {
+                text: response,
+                had_high_severity,
+            }) => {
+                let event = crate::hooks::HookEvent::ResponseTransform {
+                    user_id: message.user_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    response: response.clone(),
+                };
+                let response = match self.hooks().run(&event).await {
+                    Err(crate::hooks::HookError::Rejected { reason }) => {
+                        format!("[Response filtered: {}]", reason)
+                    }
+                    Err(err) => {
+                        format!("[Response blocked by hook policy: {}]", err)
+                    }
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_response),
+                    }) => new_response,
+                    _ => response,
+                };
+                Ok(AgenticLoopResult::Response {
+                    text: response,
+                    had_high_severity,
+                })
+            }
+            other => other,
+        };
+
         // Re-acquire lock for thread mutations. The lock is released before any
         // DB persistence (persist_assistant_response) to avoid holding the session
-        // mutex across async I/O — the same pattern used in handle_auth_intercept
-        // and the compaction sites.
+        // mutex across async I/O.
         let (submission_result, persist_text) = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -342,20 +379,8 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            // Complete, fail, or request approval
             match result {
                 Ok(AgenticLoopResult::Interrupted { partial }) => {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Interrupted".into()),
-                            &message.metadata,
-                        )
-                        .await;
-
-                    // If there's partial output, emit it so the user can see what
-                    // was generated before the interrupt.
                     if let Some(ref content) = partial {
                         let msg = format!("{}\n\n[interrupted]", content);
                         thread.complete_turn(&msg);
@@ -366,47 +391,14 @@ impl Agent {
                     }
                 }
                 _ if thread.state == ThreadState::Interrupted => {
-                    // Fallback: loop returned an error but thread was marked interrupted.
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Interrupted".into()),
-                            &message.metadata,
-                        )
-                        .await;
                     (Ok(SubmissionResult::Interrupted), None)
                 }
                 Ok(AgenticLoopResult::Response {
                     text: response,
                     had_high_severity,
                 }) => {
-                    // Hook: TransformResponse — allow hooks to modify or reject the final response
-                    let response = {
-                        let event = crate::hooks::HookEvent::ResponseTransform {
-                            user_id: message.user_id.clone(),
-                            thread_id: thread_id.to_string(),
-                            response: response.clone(),
-                        };
-                        match self.hooks().run(&event).await {
-                            Err(crate::hooks::HookError::Rejected { reason }) => {
-                                format!("[Response filtered: {}]", reason)
-                            }
-                            Err(err) => {
-                                format!("[Response blocked by hook policy: {}]", err)
-                            }
-                            Ok(crate::hooks::HookOutcome::Continue {
-                                modified: Some(new_response),
-                            }) => new_response,
-                            _ => response, // fail-open: use original
-                        }
-                    };
-
-                    // Update the injection circuit breaker and append a warning
-                    // if quarantine was just triggered for the first time.
                     let quarantine_triggered = {
-                        let had = had_high_severity;
-                        if had {
+                        if had_high_severity {
                             thread
                                 .injection_counter
                                 .record_warning_severity(&crate::safety::Severity::High);
@@ -415,22 +407,12 @@ impl Agent {
                     };
 
                     thread.complete_turn(&response);
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Done".into()),
-                            &message.metadata,
-                        )
-                        .await;
 
                     let result = if quarantine_triggered {
                         tracing::warn!(
                             thread_id = %thread_id,
                             "Injection circuit breaker triggered: entering quarantine"
                         );
-                        // Append the quarantine notice after the normal response so the user
-                        // sees both the completed turn and the safety escalation.
                         let notice = format!(
                             "{}\n\n---\n{}",
                             response,
@@ -444,20 +426,11 @@ impl Agent {
                     (result, Some(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval { pending }) => {
-                    // Store pending approval in thread and update state
                     let request_id = pending.request_id;
                     let tool_name = pending.tool_name.clone();
                     let description = pending.description.clone();
                     let parameters = pending.parameters.clone();
                     thread.await_approval(pending);
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Awaiting approval".into()),
-                            &message.metadata,
-                        )
-                        .await;
                     (
                         Ok(SubmissionResult::NeedApproval {
                             request_id,
@@ -470,11 +443,45 @@ impl Agent {
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
-                    // User message already persisted at turn start; nothing else to save
                     (Ok(SubmissionResult::error(e.to_string())), None)
                 }
             }
-        }; // Lock released before DB write
+        }; // Lock released before DB write and status notifications
+
+        // Send status updates outside the session lock
+        match &submission_result {
+            Ok(SubmissionResult::Interrupted) => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Interrupted".into()),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+            Ok(SubmissionResult::NeedApproval { .. }) => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Awaiting approval".into()),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+            _ if persist_text.is_some() => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Done".into()),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+            _ => {}
+        }
 
         // Persist assistant response outside the lock (user message already
         // persisted at turn start).
@@ -745,12 +752,25 @@ impl Agent {
         {
             Ok(result) => {
                 // Phase 3: write compacted turns back under lock
-                {
+                let written = {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.turns = thread_clone.turns;
                         thread.updated_at = thread_clone.updated_at;
+                        true
+                    } else {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Thread removed during compaction — discarding compacted result"
+                        );
+                        false
                     }
+                };
+
+                if !written {
+                    return Ok(SubmissionResult::error(
+                        "Thread was removed during compaction".to_string(),
+                    ));
                 }
 
                 let mut msg = format!(
@@ -771,16 +791,21 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-        thread.turns.clear();
-        thread.state = ThreadState::Idle;
-
-        // Clear undo history too
+        // Acquire undo_mgr before session lock to avoid holding the session
+        // mutex across async lock acquisitions (consistent with process_undo/redo).
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
+
+        {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            thread.turns.clear();
+            thread.state = ThreadState::Idle;
+        }
+
+        // Clear undo history outside the session lock
         undo_mgr.lock().await.clear();
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
@@ -1260,7 +1285,7 @@ impl Agent {
                 .await;
 
             // Handle the result. Thread mutations happen under lock; DB persistence
-            // (persist_assistant_response) runs after the lock is released.
+            // and status notifications run after the lock is released.
             let (submission_result, persist_text) = {
                 let mut sess = session.lock().await;
                 let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
@@ -1272,8 +1297,6 @@ impl Agent {
                         text: response,
                         had_high_severity,
                     }) => {
-                        // Update injection circuit breaker (merge warnings from both
-                        // the local approval-tool execution and the agentic loop).
                         let quarantine_triggered = {
                             let any_high = had_high_severity || had_high_approval;
                             if any_high {
@@ -1285,14 +1308,6 @@ impl Agent {
                         };
 
                         thread.complete_turn(&response);
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::Status("Done".into()),
-                                &message.metadata,
-                            )
-                            .await;
 
                         let result = if quarantine_triggered {
                             tracing::warn!(
@@ -1319,14 +1334,6 @@ impl Agent {
                         let description = new_pending.description.clone();
                         let parameters = new_pending.parameters.clone();
                         thread.await_approval(new_pending);
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::Status("Awaiting approval".into()),
-                                &message.metadata,
-                            )
-                            .await;
                         (
                             Ok(SubmissionResult::NeedApproval {
                                 request_id,
@@ -1339,18 +1346,9 @@ impl Agent {
                     }
                     Err(e) => {
                         thread.fail_turn(e.to_string());
-                        // User message already persisted at turn start
                         (Ok(SubmissionResult::error(e.to_string())), None)
                     }
                     Ok(AgenticLoopResult::Interrupted { partial }) => {
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::Status("Interrupted".into()),
-                                &message.metadata,
-                            )
-                            .await;
                         if let Some(content) = partial {
                             let msg = format!("{}\n\n[interrupted]", content);
                             thread.complete_turn(&msg);
@@ -1361,7 +1359,42 @@ impl Agent {
                         }
                     }
                 }
-            }; // Lock released before DB write
+            }; // Lock released before DB write and status notifications
+
+            // Send status updates outside the session lock
+            match &submission_result {
+                Ok(SubmissionResult::Interrupted) => {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Interrupted".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                }
+                Ok(SubmissionResult::NeedApproval { .. }) => {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Awaiting approval".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                }
+                _ if persist_text.is_some() => {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Done".into()),
+                            &message.metadata,
+                        )
+                        .await;
+                }
+                _ => {}
+            }
 
             // Persist assistant response outside the lock
             if let Some(ref response) = persist_text {
