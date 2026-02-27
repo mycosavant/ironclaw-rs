@@ -4,8 +4,9 @@
     "cargo install": true
   },
   "workbench.colorTheme": "Experimental Dark",
-  "workbench.iconTheme": "file-icons",
+  "workbench.iconTheme": "a-file-icon-vscode",
   "workbench.preferredDarkColorTheme": "Experimental Dark",
   "window.autoDetectColorScheme": false,
-  "editor.semanticHighlighting.enabled": true
+  "editor.semanticHighlighting.enabled": true,
+  "window.border": "#337a99"
 }
