@@ -86,6 +86,8 @@ pub struct AgentDeps {
     /// the web gateway SSE/WebSocket clients. `None` when no gateway is active.
     pub job_event_tx:
         Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
+    /// Inter-agent message bus for routed per-job communication.
+    pub agent_bus: Option<crate::agent::messaging::AgentMessageBus>,
 }
 
 /// The main agent that coordinates all components.
@@ -133,6 +135,7 @@ impl Agent {
             deps.store.clone(),
             deps.hooks.clone(),
             deps.job_event_tx.clone(),
+            deps.agent_bus.clone(),
         ));
 
         Self {
@@ -151,6 +154,11 @@ impl Agent {
     }
 
     // Convenience accessors
+
+    /// Get the scheduler (for post-construction tool registration).
+    pub fn scheduler(&self) -> &Arc<Scheduler> {
+        &self.scheduler
+    }
 
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()

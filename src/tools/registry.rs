@@ -18,12 +18,13 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 #[cfg(feature = "media")]
 use crate::tools::builtin::ImageAnalyzeTool;
 use crate::tools::builtin::{
-    ApplyPatchTool, AudioTranscribeTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool,
-    ImageConvertTool, ImageResizeTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MediaInfoTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
-    MemoryWriteTool, PdfExtractTextTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    AgentSendTool, AgentSpawnTool, ApplyPatchTool, AudioTranscribeTool, CancelJobTool,
+    CreateJobTool, EchoTool, HttpTool, ImageConvertTool, ImageResizeTool, JobEventsTool,
+    JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MediaInfoTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PdfExtractTextTool,
+    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -76,6 +77,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "agent_spawn",
+    "agent_send",
 ];
 
 /// Registry of available tools.
@@ -385,6 +388,32 @@ impl ToolRegistry {
         }
 
         tracing::info!("Registered {} job management tools", job_tool_count);
+    }
+
+    /// Register inter-agent communication tools (spawn, send).
+    ///
+    /// Must be called **after** `Agent::new()` so that the `Scheduler` is available.
+    pub fn register_iac_tools(
+        &self,
+        scheduler: Arc<crate::agent::Scheduler>,
+        agent_bus: Option<crate::agent::AgentMessageBus>,
+        context_manager: Arc<ContextManager>,
+        max_child_agents: usize,
+    ) {
+        self.register_sync(Arc::new(AgentSpawnTool::new(
+            scheduler,
+            Arc::clone(&context_manager),
+            max_child_agents,
+        )));
+
+        if let Some(bus) = agent_bus {
+            self.register_sync(Arc::new(AgentSendTool::new(bus, context_manager)));
+            tracing::info!(
+                "Registered 2 inter-agent communication tools (agent_spawn, agent_send)"
+            );
+        } else {
+            tracing::info!("Registered 1 inter-agent communication tool (agent_spawn, no bus)");
+        }
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).

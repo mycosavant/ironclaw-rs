@@ -34,6 +34,34 @@ pub struct AgentConfig {
     /// Sliding-window size for SHA-256 cycle detection in agentic loops.
     /// Set to 0 to disable. Default: 8.
     pub cycle_window_size: usize,
+    /// Inter-agent message bus capacity per job inbox. Default: 256.
+    pub agent_bus_capacity: usize,
+    /// Maximum child agents a single job can spawn. Default: 5.
+    pub max_child_agents: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            name: "ironclaw".to_string(),
+            max_parallel_jobs: 5,
+            job_timeout: Duration::from_secs(1800),
+            stuck_threshold: Duration::from_secs(300),
+            repair_check_interval: Duration::from_secs(60),
+            max_repair_attempts: 3,
+            use_planning: false,
+            session_idle_timeout: Duration::from_secs(3600),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 50,
+            auto_approve_tools: false,
+            suppress_tool_errors: false,
+            cycle_window_size: 8,
+            agent_bus_capacity: 256,
+            max_child_agents: 5,
+        }
+    }
 }
 
 impl AgentConfig {
@@ -84,6 +112,50 @@ impl AgentConfig {
                 "AGENT_CYCLE_WINDOW_SIZE",
                 settings.agent.cycle_window_size,
             )?,
+            agent_bus_capacity: parse_optional_env(
+                "AGENT_BUS_CAPACITY",
+                settings.agent.agent_bus_capacity,
+            )?,
+            max_child_agents: parse_optional_env(
+                "AGENT_MAX_CHILD_AGENTS",
+                settings.agent.max_child_agents,
+            )?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::Settings;
+
+    use super::*;
+
+    #[test]
+    fn test_defaults_without_env() {
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).unwrap();
+        assert_eq!(config.agent_bus_capacity, 256);
+        assert_eq!(config.max_child_agents, 5);
+    }
+
+    #[test]
+    fn test_env_overrides() {
+        // SAFETY: tests run single-threaded via cargo test default,
+        // and these env vars are not read by other tests concurrently.
+        unsafe {
+            std::env::set_var("AGENT_BUS_CAPACITY", "512");
+            std::env::set_var("AGENT_MAX_CHILD_AGENTS", "10");
+        }
+
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).unwrap();
+        assert_eq!(config.agent_bus_capacity, 512);
+        assert_eq!(config.max_child_agents, 10);
+
+        // Clean up env vars.
+        unsafe {
+            std::env::remove_var("AGENT_BUS_CAPACITY");
+            std::env::remove_var("AGENT_MAX_CHILD_AGENTS");
+        }
     }
 }

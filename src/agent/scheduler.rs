@@ -8,6 +8,7 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent::messaging::{self, AgentMessageBus};
 use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::agent::worker::{Worker, WorkerDeps};
 use crate::config::AgentConfig;
@@ -54,6 +55,8 @@ pub struct Scheduler {
     /// Broadcast channel for real-time job events to the web gateway.
     job_event_tx:
         Option<tokio::sync::broadcast::Sender<(Uuid, crate::channels::web::types::SseEvent)>>,
+    /// Inter-agent message bus for routed per-job communication.
+    agent_bus: Option<AgentMessageBus>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -74,6 +77,7 @@ impl Scheduler {
         job_event_tx: Option<
             tokio::sync::broadcast::Sender<(Uuid, crate::channels::web::types::SseEvent)>,
         >,
+        agent_bus: Option<AgentMessageBus>,
     ) -> Self {
         Self {
             config,
@@ -84,6 +88,7 @@ impl Scheduler {
             store,
             hooks,
             job_event_tx,
+            agent_bus,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -137,7 +142,7 @@ impl Scheduler {
     pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
         // Hold write lock for the entire check-insert sequence to prevent
         // TOCTOU races where two concurrent calls both pass the checks.
-        {
+        let start_tx = {
             let mut jobs = self.jobs.write().await;
 
             if jobs.contains_key(&job_id) {
@@ -167,6 +172,15 @@ impl Scheduler {
             // Create worker channel
             let (tx, rx) = mpsc::channel(16);
 
+            // Create per-worker inter-agent inbox and register it in the bus.
+            let inbox_rx = if let Some(ref bus) = self.agent_bus {
+                let (inbox_tx, inbox_rx) = mpsc::channel(self.config.agent_bus_capacity);
+                messaging::register_inbox(bus, job_id, inbox_tx).await;
+                Some(inbox_rx)
+            } else {
+                None
+            };
+
             // Create worker with shared dependencies
             let deps = WorkerDeps {
                 context_manager: self.context_manager.clone(),
@@ -180,27 +194,31 @@ impl Scheduler {
                 suppress_tool_errors: self.config.suppress_tool_errors,
                 job_event_tx: self.job_event_tx.clone(),
                 cycle_window_size: self.config.cycle_window_size,
+                agent_bus: self.agent_bus.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
             // Spawn worker task
             let handle = tokio::spawn(async move {
-                if let Err(e) = worker.run(rx).await {
+                if let Err(e) = worker.run(rx, inbox_rx).await {
                     tracing::error!("Worker for job {} failed: {}", job_id, e);
                 }
             });
 
-            // Start the worker
-            if tx.send(WorkerMessage::Start).await.is_err() {
-                tracing::error!(job_id = %job_id, "Worker died before receiving Start message");
-            }
-
-            // Insert while still holding the write lock
+            // Insert while still holding the write lock, keep a clone of tx to send Start.
+            let start_tx = tx.clone();
             jobs.insert(job_id, ScheduledJob { handle, tx });
+            start_tx
+        };  // write lock released here
+
+        // Start the worker outside the write lock to avoid holding it across an await.
+        if start_tx.send(WorkerMessage::Start).await.is_err() {
+            tracing::error!(job_id = %job_id, "Worker died before receiving Start message");
         }
 
         // Cleanup task for this job to avoid capacity leaks
         let jobs = Arc::clone(&self.jobs);
+        let agent_bus = self.agent_bus.clone();
         tokio::spawn(async move {
             loop {
                 let finished = {
@@ -213,6 +231,10 @@ impl Scheduler {
 
                 if finished {
                     jobs.write().await.remove(&job_id);
+                    // Deregister from the inter-agent message bus.
+                    if let Some(ref bus) = agent_bus {
+                        messaging::unregister_inbox(bus, job_id).await;
+                    }
                     break;
                 }
 
@@ -458,9 +480,17 @@ impl Scheduler {
 
     /// Stop a running job.
     pub async fn stop(&self, job_id: Uuid) -> Result<(), JobError> {
-        let mut jobs = self.jobs.write().await;
+        let scheduled = {
+            let mut jobs = self.jobs.write().await;
+            jobs.remove(&job_id)
+        };
 
-        if let Some(scheduled) = jobs.remove(&job_id) {
+        if let Some(scheduled) = scheduled {
+            // Deregister from the inter-agent message bus.
+            if let Some(ref bus) = self.agent_bus {
+                messaging::unregister_inbox(bus, job_id).await;
+            }
+
             // Send stop signal
             let _ = scheduled.tx.send(WorkerMessage::Stop).await;
 
@@ -534,7 +564,7 @@ impl Scheduler {
     /// Clean up finished jobs and subtasks.
     pub async fn cleanup_finished(&self) {
         // Clean up jobs
-        {
+        let finished_ids = {
             let mut jobs = self.jobs.write().await;
             let mut finished = Vec::new();
 
@@ -544,9 +574,18 @@ impl Scheduler {
                 }
             }
 
-            for id in finished {
-                jobs.remove(&id);
+            for id in &finished {
+                jobs.remove(id);
                 tracing::debug!("Cleaned up finished job {}", id);
+            }
+
+            finished
+        };
+
+        // Deregister finished jobs from the inter-agent message bus.
+        if let Some(ref bus) = self.agent_bus {
+            for id in finished_ids {
+                messaging::unregister_inbox(bus, id).await;
             }
         }
 
