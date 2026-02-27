@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS job_actions (
     success INTEGER NOT NULL,
     error_message TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    content_hash TEXT,
+    prev_hash TEXT,
     UNIQUE(job_id, sequence_num)
 );
 

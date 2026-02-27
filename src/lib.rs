@@ -46,6 +46,7 @@ pub mod channels;
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod estimation;

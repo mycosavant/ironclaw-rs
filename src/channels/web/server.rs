@@ -195,6 +195,8 @@ pub struct GatewayState {
     /// Sessions expire after [`session_store::SESSION_TTL_SECS`] seconds of inactivity
     /// and at most [`session_store::MAX_GATEWAY_SESSIONS`] are kept concurrently.
     pub session_store: session_store::SessionStore,
+    /// Trusted-proxy auth header (e.g. `X-Forwarded-User`).
+    pub trusted_proxy_header: Option<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -229,6 +231,7 @@ pub async fn start_server(
         token: auth_token,
         sse_tickets: state.sse_tickets.clone(),
         session_store: state.session_store.clone(),
+        trusted_proxy_header: state.trusted_proxy_header.clone(),
     };
     let protected = Router::new()
         // SSE one-time ticket issuance
@@ -2493,6 +2496,7 @@ async fn skills_install_handler(
             &normalized,
             crate::skills::SkillTrust::Installed,
             crate::skills::SkillSource::Installed,
+            None,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

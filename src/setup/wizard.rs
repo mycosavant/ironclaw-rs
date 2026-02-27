@@ -1183,6 +1183,8 @@ impl SetupWizard {
             openai_compatible: None,
             tinfoil: None,
             thinking: crate::config::ThinkingConfig::default(),
+            cheap_model: None,
+            smart_routing_cascade: true,
         };
 
         match create_llm_provider(&config, session) {

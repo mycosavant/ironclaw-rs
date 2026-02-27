@@ -181,6 +181,8 @@ fn extract_content(event: &HookEvent) -> String {
         }
         HookEvent::AgentStart { model, .. } => model.clone(),
         HookEvent::MessageWrite { content, .. } => content.clone(),
+        HookEvent::LlmCall { messages, .. } => messages.clone(),
+        HookEvent::LlmResponse { content, .. } => content.clone(),
     }
 }
 

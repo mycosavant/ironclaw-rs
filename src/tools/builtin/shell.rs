@@ -440,6 +440,27 @@ fn has_command_substitution(s: &str) -> bool {
     s.contains("$(") || s.contains('`')
 }
 
+/// Environment variables that enable dynamic linker injection (CWE-426).
+///
+/// These must never be forwarded to child processes, even if explicitly set
+/// in `extra_env` by the orchestrator. An attacker who controls these can
+/// force arbitrary shared-library loading in every subsequent command.
+const DANGEROUS_ENV_PREFIXES: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+];
+
+/// Returns true if the env var name is a dangerous linker-injection variable.
+fn is_dangerous_env_var(name: &str) -> bool {
+    DANGEROUS_ENV_PREFIXES
+        .iter()
+        .any(|prefix| name.eq_ignore_ascii_case(prefix))
+}
+
 /// Check if `token` appears as a standalone command in `lower` (not as a substring
 /// of another word).
 ///
@@ -521,6 +542,37 @@ impl ShellTool {
     pub fn with_sandbox_policy(mut self, policy: SandboxPolicy) -> Self {
         self.sandbox_policy = policy;
         self
+    }
+
+    /// Allow potentially dangerous commands (sudo, eval, etc.).
+    ///
+    /// **Security warning**: enabling this bypasses the dangerous-pattern
+    /// blocklist.  Only use in trusted environments (e.g. interactive dev
+    /// sessions behind the approval gate).
+    ///
+    /// Reads from `SHELL_ALLOW_DANGEROUS=true` env var when called via
+    /// [`ShellTool::from_env`].
+    pub fn with_allow_dangerous(mut self, allow: bool) -> Self {
+        if allow {
+            tracing::warn!(
+                "⚠  ShellTool dangerous-command filter DISABLED. \
+                 Commands like sudo, eval, and pipe-to-shell are no longer blocked. \
+                 Only enable this in trusted, interactive environments."
+            );
+        }
+        self.allow_dangerous = allow;
+        self
+    }
+
+    /// Create a shell tool configured from environment variables.
+    ///
+    /// Checks `SHELL_ALLOW_DANGEROUS` — when set to `"true"` or `"1"`, the
+    /// dangerous-pattern blocklist is bypassed (a prominent warning is logged).
+    pub fn from_env() -> Self {
+        let allow_dangerous = std::env::var("SHELL_ALLOW_DANGEROUS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        Self::new().with_allow_dangerous(allow_dangerous)
     }
 
     /// Check if a command is blocked.
@@ -608,7 +660,11 @@ impl ShellTool {
         // Inject extra environment variables (e.g., credentials fetched by the
         // worker runtime) on top of the scrubbed base. These are explicitly
         // provided by the orchestrator and are safe to forward.
-        command.envs(extra_env);
+        // Defense-in-depth: strip dynamic linker injection variables (CWE-426)
+        // even if they appear in extra_env. An attacker who compromises the
+        // orchestrator's env store could otherwise inject shared-library
+        // preloads into every shell command.
+        command.envs(extra_env.iter().filter(|(k, _)| !is_dangerous_env_var(k)));
 
         command
             .current_dir(workdir)
@@ -1391,6 +1447,24 @@ mod tests {
         for (name, _) in &secrets {
             unsafe { std::env::remove_var(name) };
         }
+    }
+
+    // ── Dynamic linker injection blocking ──────────────────────────────
+
+    #[test]
+    fn test_dangerous_env_var_detection() {
+        assert!(is_dangerous_env_var("LD_PRELOAD"));
+        assert!(is_dangerous_env_var("LD_AUDIT"));
+        assert!(is_dangerous_env_var("LD_LIBRARY_PATH"));
+        assert!(is_dangerous_env_var("DYLD_INSERT_LIBRARIES"));
+        assert!(is_dangerous_env_var("DYLD_LIBRARY_PATH"));
+        assert!(is_dangerous_env_var("DYLD_FRAMEWORK_PATH"));
+        // Case insensitive
+        assert!(is_dangerous_env_var("ld_preload"));
+        // Safe vars should not match
+        assert!(!is_dangerous_env_var("PATH"));
+        assert!(!is_dangerous_env_var("HOME"));
+        assert!(!is_dangerous_env_var("LD_DEBUG")); // not in list
     }
 
     // ── Integration: injection blocked at execute_command level ─────────

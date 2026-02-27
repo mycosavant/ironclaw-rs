@@ -105,6 +105,12 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_channels_command(ch_cmd.clone()).await;
         }
+        Some(Command::Sessions(sessions_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return run_sessions(sessions_cmd).await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
@@ -731,6 +737,19 @@ async fn run_cron_command(cron_cmd: &ironclaw::cli::CronCommand) -> anyhow::Resu
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     ironclaw::cli::run_cron_command_with_db(cron_cmd.clone(), db).await
+}
+
+/// Run the Sessions CLI subcommand.
+async fn run_sessions(sessions_cmd: &ironclaw::cli::SessionsCommand) -> anyhow::Result<()> {
+    let config = Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    ironclaw::cli::run_sessions_command(sessions_cmd.clone(), db).await
 }
 
 /// Run the Worker subcommand (inside Docker containers).

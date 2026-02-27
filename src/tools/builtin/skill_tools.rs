@@ -329,6 +329,7 @@ impl Tool for SkillInstallTool {
                 &crate::skills::normalize_line_endings(&content),
                 crate::skills::SkillTrust::Installed,
                 crate::skills::SkillSource::Installed,
+                None,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;

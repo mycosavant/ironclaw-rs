@@ -33,6 +33,38 @@ pub struct HttpConfig {
     pub user_id: String,
 }
 
+/// Gateway network mode controlling bind address and security posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayNetworkMode {
+    /// Loopback only (127.0.0.1). Default and safest mode.
+    Loopback,
+    /// Bind to all interfaces (0.0.0.0). Accessible from the local network.
+    Lan,
+    /// Bind to all interfaces with relaxed timeouts. For remote/internet access.
+    /// **Must** be behind a reverse proxy with TLS in production.
+    Remote,
+}
+
+impl GatewayNetworkMode {
+    /// Parse from a string value (case-insensitive).
+    pub fn from_str_value(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "loopback" | "local" => Some(Self::Loopback),
+            "lan" => Some(Self::Lan),
+            "remote" => Some(Self::Remote),
+            _ => None,
+        }
+    }
+
+    /// Returns the default bind host for this mode.
+    pub fn default_host(&self) -> &'static str {
+        match self {
+            Self::Loopback => "127.0.0.1",
+            Self::Lan | Self::Remote => "0.0.0.0",
+        }
+    }
+}
+
 /// Web gateway configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -41,6 +73,12 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// Trusted-proxy auth mode: when set, the gateway trusts this header
+    /// (e.g. `X-Forwarded-User`) and skips token auth. Only enable behind a
+    /// reverse proxy that sets and validates this header.
+    pub trusted_proxy_header: Option<String>,
+    /// Network mode controlling bind address and security posture.
+    pub network_mode: GatewayNetworkMode,
 }
 
 impl ChannelsConfig {
@@ -58,11 +96,43 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", true)?;
         let gateway = if gateway_enabled {
+            let network_mode = optional_env("GATEWAY_NETWORK_MODE")?
+                .and_then(|s| GatewayNetworkMode::from_str_value(&s))
+                .unwrap_or(GatewayNetworkMode::Loopback);
+
+            // Explicit GATEWAY_HOST takes precedence; otherwise use the mode's default.
+            let host = optional_env("GATEWAY_HOST")?
+                .unwrap_or_else(|| network_mode.default_host().to_string());
+
+            // Emit security warnings for non-loopback modes.
+            match network_mode {
+                GatewayNetworkMode::Lan => {
+                    tracing::warn!(
+                        "Gateway network mode is 'lan' — binding to {}. \
+                         The gateway will be accessible from your local network. \
+                         Ensure GATEWAY_AUTH_TOKEN is set to a strong value.",
+                        host
+                    );
+                }
+                GatewayNetworkMode::Remote => {
+                    tracing::warn!(
+                        "Gateway network mode is 'remote' — binding to {}. \
+                         The gateway will be accessible from the internet. \
+                         You MUST place it behind a reverse proxy with TLS. \
+                         Ensure GATEWAY_AUTH_TOKEN is set to a strong, unique value.",
+                        host
+                    );
+                }
+                GatewayNetworkMode::Loopback => {}
+            }
+
             Some(GatewayConfig {
-                host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
+                host,
                 port: parse_optional_env("GATEWAY_PORT", 3000)?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
+                trusted_proxy_header: optional_env("GATEWAY_TRUSTED_PROXY_HEADER")?,
+                network_mode,
             })
         } else {
             None

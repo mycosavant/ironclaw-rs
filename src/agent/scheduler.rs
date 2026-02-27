@@ -179,6 +179,7 @@ impl Scheduler {
                 use_planning: self.config.use_planning,
                 suppress_tool_errors: self.config.suppress_tool_errors,
                 job_event_tx: self.job_event_tx.clone(),
+                cycle_window_size: self.config.cycle_window_size,
             };
             let worker = Worker::new(job_id, deps);
 

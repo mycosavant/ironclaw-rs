@@ -319,6 +319,9 @@ pub struct NotifyConfig {
     pub on_failure: bool,
     /// Notify when routine runs with no findings.
     pub on_success: bool,
+    /// Optional webhook URL called when a run completes (any status).
+    /// The engine POSTs a JSON payload with routine_id, status, summary.
+    pub on_completion_webhook: Option<String>,
 }
 
 impl Default for NotifyConfig {
@@ -329,6 +332,7 @@ impl Default for NotifyConfig {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            on_completion_webhook: None,
         }
     }
 }

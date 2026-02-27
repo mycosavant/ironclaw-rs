@@ -14,6 +14,10 @@ pub struct RoutineConfig {
     pub default_cooldown_secs: u64,
     /// Max output tokens for lightweight routine LLM calls.
     pub max_lightweight_tokens: u32,
+    /// Maximum random jitter (seconds) added before each cron routine fires.
+    /// Prevents thundering-herd when many routines share the same schedule.
+    /// 0 = disabled (default).
+    pub stagger_max_secs: u64,
 }
 
 impl Default for RoutineConfig {
@@ -24,6 +28,7 @@ impl Default for RoutineConfig {
             max_concurrent_routines: 10,
             default_cooldown_secs: 300,
             max_lightweight_tokens: 4096,
+            stagger_max_secs: 0,
         }
     }
 }
@@ -36,6 +41,7 @@ impl RoutineConfig {
             max_concurrent_routines: parse_optional_env("ROUTINES_MAX_CONCURRENT", 10)?,
             default_cooldown_secs: parse_optional_env("ROUTINES_DEFAULT_COOLDOWN", 300)?,
             max_lightweight_tokens: parse_optional_env("ROUTINES_MAX_TOKENS", 4096)?,
+            stagger_max_secs: parse_optional_env("ROUTINES_STAGGER_MAX_SECS", 0)?,
         })
     }
 }

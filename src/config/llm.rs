@@ -216,6 +216,11 @@ pub struct LlmConfig {
     pub tinfoil: Option<TinfoilConfig>,
     /// Extended thinking budget configuration.
     pub thinking: ThinkingConfig,
+    /// Universal cheap model for smart routing (any backend).
+    /// Falls back to `nearai.cheap_model` for backward compatibility.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing.
+    pub smart_routing_cascade: bool,
 }
 
 /// NEAR AI configuration.
@@ -448,6 +453,11 @@ impl LlmConfig {
             model_overrides: thinking_overrides,
         };
 
+        // Universal cheap model: LLM_CHEAP_MODEL env var, falls back to nearai.cheap_model.
+        let cheap_model: Option<String> =
+            optional_env("LLM_CHEAP_MODEL")?.or_else(|| nearai.cheap_model.clone());
+        let smart_routing_cascade = nearai.smart_routing_cascade;
+
         Ok(Self {
             backend,
             nearai,
@@ -457,6 +467,8 @@ impl LlmConfig {
             openai_compatible,
             tinfoil,
             thinking,
+            cheap_model,
+            smart_routing_cascade,
         })
     }
 }

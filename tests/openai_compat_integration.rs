@@ -212,6 +212,7 @@ async fn start_test_server_with_provider(
         repair_last_tick: None,
         channel_health: None,
         session_store: ironclaw::channels::web::session_store::new_session_store(),
+        trusted_proxy_header: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -706,6 +707,7 @@ async fn test_no_llm_provider_returns_503() {
         repair_last_tick: None,
         channel_health: None,
         session_store: ironclaw::channels::web::session_store::new_session_store(),
+        trusted_proxy_header: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

@@ -19,6 +19,10 @@ pub struct AuthState {
     pub sse_tickets: SseTicketStore,
     /// Short-lived session tokens (accepted in place of the master token).
     pub session_store: SessionStore,
+    /// Trusted-proxy header name (e.g. `X-Forwarded-User`). When set,
+    /// requests with a non-empty value in this header bypass token auth.
+    /// Only safe behind a reverse proxy that strips and re-sets this header.
+    pub trusted_proxy_header: Option<String>,
 }
 
 /// Auth middleware that validates bearer token from header or query param.
@@ -34,6 +38,16 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // Trusted-proxy mode: if configured, trust the upstream proxy header.
+    // The proxy is responsible for authenticating the user and setting this header.
+    if let Some(ref proxy_header) = auth.trusted_proxy_header
+        && let Some(value) = headers.get(proxy_header.as_str())
+        && let Ok(user) = value.to_str()
+        && !user.is_empty()
+    {
+        return next.run(request).await;
+    }
+
     // Authorization header: master token (constant-time) or valid session token.
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
@@ -96,6 +110,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             session_store: crate::channels::web::session_store::new_session_store(),
+            trusted_proxy_header: None,
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");

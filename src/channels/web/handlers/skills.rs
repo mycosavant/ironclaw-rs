@@ -180,6 +180,7 @@ pub async fn skills_install_handler(
             &normalized,
             crate::skills::SkillTrust::Installed,
             crate::skills::SkillSource::Installed,
+            None,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

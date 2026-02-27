@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod log_layer;
 pub mod openai_compat;
+pub mod pid_lock;
 pub mod server;
 pub mod session_store;
 pub mod sse;
@@ -54,6 +55,8 @@ pub struct GatewayChannel {
     state: Arc<GatewayState>,
     /// The actual auth token in use (generated or from config).
     auth_token: String,
+    /// PID lock preventing multiple gateway instances.
+    pid_lock: tokio::sync::Mutex<Option<pid_lock::PidLock>>,
 }
 
 impl GatewayChannel {
@@ -99,12 +102,14 @@ impl GatewayChannel {
             repair_last_tick: None,
             session_store: session_store::new_session_store(),
             channel_health: None,
+            trusted_proxy_header: config.trusted_proxy_header.clone(),
         });
 
         Self {
             config,
             state,
             auth_token,
+            pid_lock: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -138,6 +143,7 @@ impl GatewayChannel {
             repair_last_tick: self.state.repair_last_tick.clone(),
             channel_health: self.state.channel_health.clone(),
             session_store: self.state.session_store.clone(),
+            trusted_proxy_header: self.state.trusted_proxy_header.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -279,6 +285,13 @@ impl Channel for GatewayChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        // Acquire PID lock to prevent multiple gateway instances
+        let lock = pid_lock::PidLock::acquire().map_err(|e| ChannelError::StartupFailed {
+            name: "gateway".to_string(),
+            reason: format!("PID lock: {}", e),
+        })?;
+        *self.pid_lock.lock().await = Some(lock);
+
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
 
@@ -291,6 +304,17 @@ impl Channel for GatewayChannel {
                     self.config.host, self.config.port, e
                 ),
             })?;
+
+        // Warn if trusted-proxy is enabled on a non-loopback address
+        if self.config.trusted_proxy_header.is_some() && !addr.ip().is_loopback() {
+            tracing::warn!(
+                header = ?self.config.trusted_proxy_header,
+                bind = %addr,
+                "Trusted-proxy auth is enabled on a non-loopback address. \
+                 Any client can forge the header and bypass authentication. \
+                 Ensure a reverse proxy strips and re-sets this header."
+            );
+        }
 
         server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
 
@@ -428,6 +452,10 @@ impl Channel for GatewayChannel {
             let _ = tx.send(());
         }
         *self.state.msg_tx.write().await = None;
+
+        // Release PID lock (removes the PID file)
+        self.pid_lock.lock().await.take();
+
         Ok(())
     }
 }

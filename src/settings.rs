@@ -315,6 +315,10 @@ pub struct AgentSettings {
     /// message instead of the raw error.
     #[serde(default)]
     pub suppress_tool_errors: bool,
+
+    /// Sliding-window size for SHA-256 cycle detection. 0 = disabled.
+    #[serde(default = "default_cycle_window_size")]
+    pub cycle_window_size: usize,
 }
 
 fn default_agent_name() -> String {
@@ -349,6 +353,10 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_cycle_window_size() -> usize {
+    8
+}
+
 fn default_true() -> bool {
     true
 }
@@ -367,6 +375,7 @@ impl Default for AgentSettings {
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
             suppress_tool_errors: false,
+            cycle_window_size: default_cycle_window_size(),
         }
     }
 }

@@ -515,7 +515,8 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content, d.path
+                    SELECT c.id, c.document_id, c.content, d.path,
+                           c.chunk_index, d.updated_at
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -545,6 +546,8 @@ impl WorkspaceStore for LibSqlBackend {
                     content: get_text(&row, 2),
                     document_path: get_text(&row, 3),
                     rank: results.len() as u32 + 1,
+                    chunk_index: get_i64(&row, 4) as i32,
+                    updated_at: get_opt_ts(&row, 5),
                 });
             }
             results
@@ -564,7 +567,8 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content, d.path
+                    SELECT c.id, c.document_id, c.content, d.path,
+                           c.chunk_index, d.updated_at
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
@@ -591,6 +595,8 @@ impl WorkspaceStore for LibSqlBackend {
                     content: get_text(&row, 2),
                     document_path: get_text(&row, 3),
                     rank: results.len() as u32 + 1,
+                    chunk_index: get_i64(&row, 4) as i32,
+                    updated_at: get_opt_ts(&row, 5),
                 });
             }
             results

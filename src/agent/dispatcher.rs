@@ -14,7 +14,7 @@ use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult, Role};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondOutput, RespondResult, Role};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -174,6 +174,9 @@ impl Agent {
         let mut iteration = 0;
         // Track whether any High+ injection warning fired during this turn.
         let mut had_high_severity = false;
+        // SHA-256 cycle detection for repeating tool-call patterns.
+        let mut cycle_guard =
+            crate::agent::cycle_guard::CycleGuard::new(self.config.cycle_window_size);
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -254,13 +257,18 @@ impl Agent {
             // text response on the final iteration.
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
-                .with_tools(tool_defs)
+                .with_tools(tool_defs.clone())
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
                     m.insert("thread_id".to_string(), thread_id.to_string());
                     m.insert("sender_id".to_string(), message.user_id.clone());
                     if let Some(ref name) = message.user_name {
                         m.insert("sender_name".to_string(), name.clone());
+                    }
+                    // Routing hint for smart routing: flag complex contexts so
+                    // the router avoids sending them to the cheap model.
+                    if tool_defs.len() > 15 || context_messages.len() > 20 {
+                        m.insert("routing_hint".to_string(), "complex".to_string());
                     }
                     m
                 });
@@ -273,7 +281,71 @@ impl Agent {
                 );
             }
 
+            // Hook: BeforeLlmCall — let hooks inspect/modify the messages
+            {
+                let messages_json = serde_json::to_string(&context.messages).unwrap_or_default();
+                let mut event = crate::hooks::HookEvent::LlmCall {
+                    user_id: message.user_id.clone(),
+                    model: self.llm().active_model_name(),
+                    messages: messages_json,
+                };
+                match self.hooks().run(&event).await {
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_msgs),
+                    }) => {
+                        event.apply_modification(&new_msgs);
+                        if let crate::hooks::HookEvent::LlmCall { messages, .. } = &event
+                            && let Ok(parsed) = serde_json::from_str(messages)
+                        {
+                            context.messages = parsed;
+                        }
+                    }
+                    Err(crate::hooks::HookError::Rejected { reason }) => {
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected { reason },
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
             let output = reasoning.respond_with_tools(&context).await?;
+
+            // Hook: AfterLlmResponse — let hooks inspect/modify the response
+            let output = {
+                let response_content = match &output.result {
+                    RespondResult::Text(text) => text.clone(),
+                    RespondResult::ToolCalls { content, .. } => content.clone().unwrap_or_default(),
+                };
+                let event = crate::hooks::HookEvent::LlmResponse {
+                    user_id: message.user_id.clone(),
+                    model: self.llm().active_model_name(),
+                    content: response_content,
+                    finish_reason: "stop".to_string(),
+                };
+                // Fire-and-observe: AfterLlmResponse hooks can log/audit but
+                // modifying the tool_calls structure is complex; we only apply
+                // text modifications to text responses.
+                match self.hooks().run(&event).await {
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_content),
+                    }) => {
+                        match output.result {
+                            RespondResult::Text(_) => RespondOutput {
+                                result: RespondResult::Text(new_content),
+                                usage: output.usage,
+                            },
+                            _ => output, // Don't modify tool call responses
+                        }
+                    }
+                    Err(crate::hooks::HookError::Rejected { reason }) => {
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected { reason },
+                        ));
+                    }
+                    _ => output,
+                }
+            };
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
@@ -310,6 +382,22 @@ impl Agent {
                         content,
                         tool_calls.clone(),
                     ));
+
+                    // Cycle detection: if the same tool-call pattern repeats,
+                    // nudge the LLM to produce a text response instead.
+                    if cycle_guard.record_and_check(&tool_calls) {
+                        tracing::warn!(
+                            iteration,
+                            "Loop guard: repeated tool-call pattern detected, \
+                             forcing text response"
+                        );
+                        context_messages.push(ChatMessage::system(
+                            "A repeating pattern of tool calls was detected. \
+                             Stop calling tools and provide a direct text response \
+                             summarising what you have accomplished so far.",
+                        ));
+                        continue;
+                    }
 
                     // Execute tools and add results to context
                     let _ = self
@@ -970,6 +1058,7 @@ mod tests {
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
                 suppress_tool_errors: false,
+                cycle_window_size: 10,
             },
             deps,
             Arc::new(ChannelManager::new()),

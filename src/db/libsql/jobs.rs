@@ -185,8 +185,9 @@ impl JobStore for LibSqlBackend {
             r#"
                 INSERT INTO job_actions (
                     id, job_id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                    sanitization_warnings, cost, duration_ms, success, error_message, created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                    content_hash, prev_hash
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 "#,
             params![
                 action.id.to_string(),
@@ -202,6 +203,8 @@ impl JobStore for LibSqlBackend {
                 action.success as i64,
                 opt_text(action.error.as_deref()),
                 fmt_ts(&action.executed_at),
+                opt_text(action.content_hash.as_deref()),
+                opt_text(action.prev_hash.as_deref()),
             ],
         )
         .await
@@ -215,7 +218,8 @@ impl JobStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                       sanitization_warnings, cost, duration_ms, success, error_message, created_at
+                       sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                       content_hash, prev_hash
                 FROM job_actions WHERE job_id = ?1 ORDER BY sequence_num
                 "#,
                 params![job_id.to_string()],
@@ -244,6 +248,8 @@ impl JobStore for LibSqlBackend {
                 success: get_i64(&row, 9) != 0,
                 error: get_opt_text(&row, 10),
                 executed_at: get_ts(&row, 11),
+                content_hash: get_opt_text(&row, 12),
+                prev_hash: get_opt_text(&row, 13),
             });
         }
         Ok(actions)

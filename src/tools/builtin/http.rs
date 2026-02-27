@@ -83,7 +83,10 @@ impl HttpTool {
 /// should pin these addresses into the `reqwest::Client` via
 /// `resolve_to_addrs()` to close the TOCTOU window between validation
 /// and connection (DNS rebinding defense).
-async fn validate_url(url: &str) -> Result<(reqwest::Url, Vec<SocketAddr>), ToolError> {
+///
+/// This function is `pub(crate)` so other tools (media, skills, etc.) can
+/// reuse the same SSRF validation without duplicating logic.
+pub(crate) async fn validate_url(url: &str) -> Result<(reqwest::Url, Vec<SocketAddr>), ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 
@@ -143,7 +146,9 @@ async fn validate_url(url: &str) -> Result<(reqwest::Url, Vec<SocketAddr>), Tool
     Ok((parsed, resolved))
 }
 
-fn is_disallowed_ip(ip: &IpAddr) -> bool {
+/// Check whether an IP address belongs to a disallowed range (private, loopback,
+/// link-local, multicast, etc.).  `pub(crate)` for reuse from media and skill tools.
+pub(crate) fn is_disallowed_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_disallowed_ipv4(v4),
         IpAddr::V6(v6) => {
@@ -361,12 +366,19 @@ impl Tool for HttpTool {
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
+        // Parse optional timeout (clamped to 1–300 seconds, default 30)
+        let timeout_secs = params
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .map(|t| t.clamp(1, 300))
+            .unwrap_or(30);
+
         // Pin the validated DNS addresses into a per-request client so that
         // reqwest connects to the exact IPs we checked, closing the TOCTOU
         // window that would allow DNS rebinding between validation and connect.
         let pinned_client = if let Some(host) = parsed_url.host_str() {
             Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(timeout_secs))
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve_to_addrs(host, &resolved_addrs)
                 .build()

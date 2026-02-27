@@ -259,6 +259,10 @@ impl RoutineEngine {
     }
 
     /// Spawn a fire in a background task.
+    ///
+    /// When `stagger_max_secs > 0`, a deterministic random delay (derived from
+    /// the routine ID) is applied before execution to spread thundering-herd
+    /// cron triggers across the stagger window.
     fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
         let run = RoutineRun {
             id: Uuid::new_v4(),
@@ -283,6 +287,10 @@ impl RoutineEngine {
             scheduler: self.scheduler.clone(),
         };
 
+        // Deterministic jitter derived from routine ID so the same routine
+        // always gets the same stagger offset within a given window.
+        let stagger = self.config.stagger_max_secs;
+
         // Record the run in DB, then spawn execution
         let store = self.store.clone();
         tokio::spawn(async move {
@@ -290,6 +298,21 @@ impl RoutineEngine {
                 tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
                 return;
             }
+
+            // Apply stagger delay before execution
+            if stagger > 0 {
+                let hash = routine.id.as_u128();
+                let jitter_secs = (hash % stagger as u128) as u64;
+                if jitter_secs > 0 {
+                    tracing::debug!(
+                        routine = %routine.name,
+                        jitter_secs,
+                        "Staggering routine fire"
+                    );
+                    tokio::time::sleep(Duration::from_secs(jitter_secs)).await;
+                }
+            }
+
             execute_routine(engine, routine, run).await;
         });
     }
@@ -627,6 +650,41 @@ async fn send_notification(
 
     if let Err(e) = tx.send(response).await {
         tracing::error!(routine = %routine_name, "Failed to send notification: {}", e);
+    }
+
+    // Fire completion webhook if configured (fire-and-forget, best effort).
+    if let Some(ref url) = notify.on_completion_webhook {
+        let payload = serde_json::json!({
+            "routine_name": routine_name,
+            "status": status.to_string(),
+            "summary": summary,
+        });
+        let url = url.clone();
+        let routine_name_owned = routine_name.to_string();
+        tokio::spawn(async move {
+            match reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+            {
+                Ok(client) => {
+                    if let Err(e) = client.post(&url).json(&payload).send().await {
+                        tracing::warn!(
+                            routine = %routine_name_owned,
+                            url = %url,
+                            "Completion webhook failed: {}",
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        routine = %routine_name_owned,
+                        "Failed to build HTTP client for webhook: {}",
+                        e
+                    );
+                }
+            }
+        });
     }
 }
 

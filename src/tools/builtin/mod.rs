@@ -3,7 +3,7 @@
 mod echo;
 pub mod extension_tools;
 mod file;
-mod http;
+pub(crate) mod http;
 mod job;
 mod json;
 pub mod media;

@@ -5,6 +5,8 @@
 //! - Learning from past executions
 //! - Analytics and metrics
 
+pub mod chain;
+
 #[cfg(feature = "postgres")]
 mod analytics;
 mod store;

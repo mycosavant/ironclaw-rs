@@ -204,6 +204,7 @@ impl Tool for MemorySearchTool {
                 "score": r.score,
                 "document_id": r.document_id.to_string(),
                 "document_path": r.document_path,
+                "chunk_index": r.chunk_index,
                 "is_hybrid_match": r.is_hybrid(),
             })).collect::<Vec<_>>(),
             "result_count": results.len(),

@@ -28,6 +28,7 @@ pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod service;
+pub mod sessions;
 pub mod status;
 mod tool;
 
@@ -46,6 +47,7 @@ pub use message::{MessageCommand, run_message_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use service::{ServiceCommand, run_service_command};
+pub use sessions::{SessionsCommand, run_sessions_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
@@ -141,6 +143,10 @@ pub enum Command {
     /// Manage WASM channel modules (list, install, remove, status)
     #[command(subcommand)]
     Channels(ChannelsCommand),
+
+    /// List and export conversation sessions
+    #[command(subcommand)]
+    Sessions(SessionsCommand),
 
     /// Probe external dependencies and validate configuration
     Doctor,

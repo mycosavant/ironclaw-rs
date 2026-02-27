@@ -25,6 +25,10 @@ pub enum HookPoint {
     OnSessionEnd,
     /// Transform the final response before completing a turn.
     TransformResponse,
+    /// Before sending a request to the LLM (inspect/modify messages).
+    BeforeLlmCall,
+    /// After receiving an LLM response (inspect/modify response).
+    AfterLlmResponse,
 }
 
 impl HookPoint {
@@ -39,6 +43,8 @@ impl HookPoint {
             HookPoint::OnSessionStart => "onSessionStart",
             HookPoint::OnSessionEnd => "onSessionEnd",
             HookPoint::TransformResponse => "transformResponse",
+            HookPoint::BeforeLlmCall => "beforeLlmCall",
+            HookPoint::AfterLlmResponse => "afterLlmResponse",
         }
     }
 }
@@ -100,6 +106,25 @@ pub enum HookEvent {
         thread_id: String,
         response: String,
     },
+    /// A request is about to be sent to the LLM.
+    ///
+    /// Hooks can inspect/modify the serialized messages (JSON array).
+    /// Returning a `modify` response replaces the messages payload.
+    LlmCall {
+        user_id: String,
+        model: String,
+        /// JSON-serialized message array.
+        messages: String,
+    },
+    /// A response was received from the LLM.
+    ///
+    /// Hooks can inspect/modify the response content.
+    LlmResponse {
+        user_id: String,
+        model: String,
+        content: String,
+        finish_reason: String,
+    },
 }
 
 impl HookEvent {
@@ -114,6 +139,8 @@ impl HookEvent {
             HookEvent::SessionStart { .. } => HookPoint::OnSessionStart,
             HookEvent::SessionEnd { .. } => HookPoint::OnSessionEnd,
             HookEvent::ResponseTransform { .. } => HookPoint::TransformResponse,
+            HookEvent::LlmCall { .. } => HookPoint::BeforeLlmCall,
+            HookEvent::LlmResponse { .. } => HookPoint::AfterLlmResponse,
         }
     }
 
@@ -163,6 +190,12 @@ impl HookEvent {
             }
             HookEvent::SessionStart { .. } | HookEvent::SessionEnd { .. } => {
                 // Session events don't have modifiable content
+            }
+            HookEvent::LlmCall { messages, .. } => {
+                *messages = modified.to_string();
+            }
+            HookEvent::LlmResponse { content, .. } => {
+                *content = modified.to_string();
             }
         }
     }

@@ -31,6 +31,9 @@ pub struct AgentConfig {
     /// generic message instead of the raw error. The LLM still receives the
     /// full error for reasoning. Default: false.
     pub suppress_tool_errors: bool,
+    /// Sliding-window size for SHA-256 cycle detection in agentic loops.
+    /// Set to 0 to disable. Default: 8.
+    pub cycle_window_size: usize,
 }
 
 impl AgentConfig {
@@ -76,6 +79,10 @@ impl AgentConfig {
             suppress_tool_errors: parse_bool_env(
                 "SUPPRESS_TOOL_ERRORS",
                 settings.agent.suppress_tool_errors,
+            )?,
+            cycle_window_size: parse_optional_env(
+                "AGENT_CYCLE_WINDOW_SIZE",
+                settings.agent.cycle_window_size,
             )?,
         })
     }

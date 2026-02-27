@@ -39,6 +39,8 @@ pub struct WorkerDeps {
     /// Broadcast channel for real-time job events to the web gateway.
     pub job_event_tx:
         Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
+    /// Sliding-window size for tool-call cycle detection. 0 = disabled.
+    pub cycle_window_size: usize,
 }
 
 /// Worker that executes a single job.
@@ -272,6 +274,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             return self.execute_plan(rx, reasoning, reason_ctx, plan).await;
         }
 
+        // SHA-256 cycle detection for repeating tool-call patterns.
+        let mut cycle_guard =
+            crate::agent::cycle_guard::CycleGuard::new(self.deps.cycle_window_size);
+
         // Otherwise, use direct tool selection loop
         loop {
             // Check for stop signal
@@ -307,6 +313,27 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
+
+            // Cycle detection on select_tools output
+            if !selections.is_empty() {
+                let pairs: Vec<(&str, &serde_json::Value)> = selections
+                    .iter()
+                    .map(|s| (s.tool_name.as_str(), &s.parameters))
+                    .collect();
+                if cycle_guard.record_and_check_selections(&pairs) {
+                    tracing::warn!(
+                        job_id = %self.job_id,
+                        "Loop guard: repeated tool-selection pattern detected, \
+                         forcing text response"
+                    );
+                    reason_ctx.messages.push(ChatMessage::system(
+                        "A repeating pattern of tool calls was detected. \
+                         Stop calling tools and provide a direct text response \
+                         summarising what you have accomplished so far.",
+                    ));
+                    continue;
+                }
+            }
 
             if selections.is_empty() {
                 // No tools from select_tools, ask LLM directly (may still return tool calls)
@@ -369,6 +396,21 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                                 content,
                                 tool_calls.clone(),
                             ));
+
+                        // Cycle detection
+                        if cycle_guard.record_and_check(&tool_calls) {
+                            tracing::warn!(
+                                job_id = %self.job_id,
+                                "Loop guard: repeated tool-call pattern detected, \
+                                 forcing text response"
+                            );
+                            reason_ctx.messages.push(ChatMessage::system(
+                                "A repeating pattern of tool calls was detected. \
+                                 Stop calling tools and provide a direct text response \
+                                 summarising what you have accomplished so far.",
+                            ));
+                            continue;
+                        }
 
                         // Convert ToolCalls to ToolSelections and execute in parallel
                         let selections: Vec<ToolSelection> = tool_calls
@@ -1191,6 +1233,7 @@ mod tests {
             use_planning: false,
             suppress_tool_errors: false,
             job_event_tx: None,
+            cycle_window_size: 8,
         };
 
         Worker::new(job_id, deps)

@@ -796,6 +796,17 @@ impl Tool for AudioTranscribeTool {
 
         let base_url =
             std::env::var("WHISPER_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
+
+        // SSRF protection: validate the Whisper API base URL before making any
+        // network request.  An attacker who controls WHISPER_BASE_URL (via env
+        // injection or config override) could redirect transcription requests
+        // to an internal endpoint.
+        crate::tools::builtin::http::validate_url(&format!(
+            "{}/v1/audio/transcriptions",
+            base_url.trim_end_matches('/')
+        ))
+        .await?;
+
         let model = std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "whisper-1".into());
 
         let base = workspace_base()?;

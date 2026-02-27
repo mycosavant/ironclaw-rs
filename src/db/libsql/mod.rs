@@ -415,6 +415,7 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             on_success: get_i64(row, 14) != 0,
             on_failure: get_i64(row, 15) != 0,
             on_attention: get_i64(row, 16) != 0,
+            on_completion_webhook: None, // Not yet stored in libsql schema
         },
         state: get_json(row, 17),
         last_run_at: get_opt_ts(row, 18),

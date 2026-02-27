@@ -67,6 +67,9 @@ pub enum SkillRegistryError {
 
     #[error("Installation path escapes target directory: {path}")]
     PathEscape { path: String },
+
+    #[error("Invalid signature for '{name}': {reason}")]
+    InvalidSignature { name: String, reason: String },
 }
 
 /// Registry of available skills.
@@ -79,6 +82,8 @@ pub struct SkillRegistry {
     installed_dir: PathBuf,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Ed25519 signing configuration for manifest verification.
+    signing_config: Option<crate::crypto::SigningConfig>,
 }
 
 impl SkillRegistry {
@@ -89,12 +94,19 @@ impl SkillRegistry {
             user_dir,
             installed_dir,
             workspace_dir: None,
+            signing_config: None,
         }
     }
 
     /// Set a workspace skills directory.
     pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
         self.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Set the Ed25519 signing configuration for manifest verification.
+    pub fn with_signing_config(mut self, config: crate::crypto::SigningConfig) -> Self {
+        self.signing_config = Some(config);
         self
     }
 
@@ -272,7 +284,7 @@ impl SkillRegistry {
         trust: SkillTrust,
         source: SkillSource,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
-        load_and_validate_skill(path, trust, source).await
+        load_and_validate_skill(path, trust, source, self.signing_config.as_ref()).await
     }
 
     /// Get all loaded skills.
@@ -312,6 +324,7 @@ impl SkillRegistry {
         normalized_content: &str,
         trust: SkillTrust,
         make_source: fn(PathBuf) -> SkillSource,
+        signing_config: Option<&crate::crypto::SigningConfig>,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
         // Defense-in-depth: re-validate skill name at install time
         if !crate::skills::validate_skill_name(skill_name) {
@@ -387,7 +400,7 @@ impl SkillRegistry {
 
         // Load by re-reading from disk (validates round-trip)
         let source = make_source(canonical_skill);
-        load_and_validate_skill(&skill_path, trust, source).await
+        load_and_validate_skill(&skill_path, trust, source, signing_config).await
     }
 
     /// Commit a prepared skill into the in-memory registry.
@@ -439,6 +452,7 @@ impl SkillRegistry {
             &normalized,
             SkillTrust::Installed,
             SkillSource::Installed,
+            self.signing_config.as_ref(),
         )
         .await?;
         self.commit_install(&name, skill)?;
@@ -542,6 +556,7 @@ async fn load_and_validate_skill(
     path: &Path,
     trust: SkillTrust,
     source: SkillSource,
+    signing_config: Option<&crate::crypto::SigningConfig>,
 ) -> Result<(String, LoadedSkill), SkillRegistryError> {
     // Check for symlink at the file level
     let file_meta =
@@ -572,6 +587,45 @@ async fn load_and_validate_skill(
             size: raw_bytes.len() as u64,
             max: MAX_PROMPT_FILE_SIZE,
         });
+    }
+
+    // Ed25519 signature verification (when signing keys are configured).
+    if let Some(signing) = signing_config
+        && !signing.is_empty()
+    {
+        match crate::crypto::signing::read_sig_file(path).await {
+            Ok(Some(sig_hex)) => {
+                crate::crypto::signing::verify_detached_signature(
+                    &raw_bytes,
+                    &sig_hex,
+                    &signing.keys,
+                )
+                .map_err(|e| SkillRegistryError::InvalidSignature {
+                    name: path.display().to_string(),
+                    reason: e.to_string(),
+                })?;
+                tracing::debug!(path = %path.display(), "Skill signature verified");
+            }
+            Ok(None) if trust == SkillTrust::Installed && signing.require_for_installed => {
+                return Err(SkillRegistryError::InvalidSignature {
+                    name: path.display().to_string(),
+                    reason: "Signature required for installed skills but .sig file not found"
+                        .to_string(),
+                });
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "No .sig file found, skipping signature verification"
+                );
+            }
+            Err(e) => {
+                return Err(SkillRegistryError::ReadError {
+                    path: path.display().to_string(),
+                    reason: format!("Failed to read signature file: {e}"),
+                });
+            }
+        }
     }
 
     let raw_content = String::from_utf8(raw_bytes).map_err(|e| SkillRegistryError::ReadError {
@@ -1197,6 +1251,7 @@ mod tests {
             "---\nname: test-skill\n---\n\nPrompt.\n",
             SkillTrust::Installed,
             SkillSource::Installed,
+            None,
         )
         .await;
 
@@ -1219,6 +1274,7 @@ mod tests {
             "---\nname: normal-skill\n---\n\nPrompt.\n",
             SkillTrust::Installed,
             SkillSource::Installed,
+            None,
         )
         .await;
 

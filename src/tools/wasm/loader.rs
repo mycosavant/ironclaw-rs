@@ -79,6 +79,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    signing_config: Option<crate::crypto::SigningConfig>,
 }
 
 impl WasmToolLoader {
@@ -88,12 +89,19 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            signing_config: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the Ed25519 signing configuration for WASM module verification.
+    pub fn with_signing_config(mut self, config: crate::crypto::SigningConfig) -> Self {
+        self.signing_config = Some(config);
         self
     }
 
@@ -119,6 +127,44 @@ impl WasmToolLoader {
             return Err(WasmLoadError::WasmNotFound(wasm_path.to_path_buf()));
         }
         let wasm_bytes = fs::read(wasm_path).await?;
+
+        // Ed25519 signature verification (when signing keys are configured).
+        if let Some(ref signing) = self.signing_config
+            && !signing.is_empty()
+        {
+            match crate::crypto::signing::read_sig_file(wasm_path).await {
+                Ok(Some(sig_hex)) => {
+                    crate::crypto::signing::verify_detached_signature(
+                        &wasm_bytes,
+                        &sig_hex,
+                        &signing.keys,
+                    )
+                    .map_err(|e| {
+                        WasmLoadError::InvalidCapabilities(format!(
+                            "Signature verification failed: {e}"
+                        ))
+                    })?;
+                    tracing::debug!(
+                        name = name,
+                        wasm_path = %wasm_path.display(),
+                        "WASM module signature verified"
+                    );
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        name = name,
+                        "No .sig file found for WASM module, skipping verification"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        name = name,
+                        error = %e,
+                        "Failed to read WASM signature file"
+                    );
+                }
+            }
+        }
 
         // Read capabilities (optional) and extract OAuth refresh config
         let (capabilities, oauth_refresh) = if let Some(cap_path) = capabilities_path {

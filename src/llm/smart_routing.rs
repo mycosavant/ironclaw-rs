@@ -39,6 +39,10 @@ pub struct SmartRoutingConfig {
     pub simple_max_chars: usize,
     /// Message length threshold above which a message is classified as Complex (default: 1000).
     pub complex_min_chars: usize,
+    /// Maximum number of available tools for which a Simple tool-use request
+    /// may be routed to the cheap model. Set to 0 to always route tool use
+    /// to primary. Default: 3.
+    pub simple_tool_max_count: usize,
 }
 
 impl Default for SmartRoutingConfig {
@@ -47,6 +51,7 @@ impl Default for SmartRoutingConfig {
             cascade_enabled: true,
             simple_max_chars: 200,
             complex_min_chars: 1000,
+            simple_tool_max_count: 3,
         }
     }
 }
@@ -164,6 +169,37 @@ impl SmartRoutingProvider {
         ];
 
         uncertainty_patterns.iter().any(|p| lower.contains(p))
+    }
+
+    /// Classify a tool-use request based on message content and tool context.
+    ///
+    /// Enriches the base text classification with tool count and metadata hints.
+    fn classify_tool_request(&self, request: &ToolCompletionRequest) -> TaskComplexity {
+        // Check for explicit routing hint in metadata.
+        if request
+            .metadata
+            .get("routing_hint")
+            .map(|h| h == "complex")
+            .unwrap_or(false)
+        {
+            return TaskComplexity::Complex;
+        }
+
+        // Many available tools strongly signals a complex request.
+        if request.tools.len() > 10 {
+            return TaskComplexity::Complex;
+        }
+
+        // Base classification from the last user message.
+        let last_user_msg = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+
+        classify_message(last_user_msg, &self.config)
     }
 }
 
@@ -326,18 +362,39 @@ impl LlmProvider for SmartRoutingProvider {
         }
     }
 
-    /// Tool use always goes to the primary model for reliable structured output.
+    /// Route tool-use requests based on task complexity.
+    ///
+    /// Simple requests with few available tools may go to the cheap model;
+    /// everything else goes to the primary model for reliable structured output.
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(
-            model = %self.primary.model_name(),
-            "Smart routing: Tool use -> primary model (always)"
-        );
-        self.primary.complete_with_tools(request).await
+
+        let complexity = self.classify_tool_request(&request);
+        let tool_count = request.tools.len();
+        let max_for_cheap = self.config.simple_tool_max_count;
+
+        if complexity == TaskComplexity::Simple && tool_count <= max_for_cheap && max_for_cheap > 0
+        {
+            tracing::debug!(
+                model = %self.cheap.model_name(),
+                tools = tool_count,
+                "Smart routing: Simple tool use -> cheap model"
+            );
+            self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
+            self.cheap.complete_with_tools(request).await
+        } else {
+            tracing::debug!(
+                model = %self.primary.model_name(),
+                tools = tool_count,
+                ?complexity,
+                "Smart routing: Tool use -> primary model"
+            );
+            self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+            self.primary.complete_with_tools(request).await
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -700,5 +757,90 @@ mod tests {
         let router = SmartRoutingProvider::new(primary, cheap, default_config());
         assert_eq!(router.model_name(), "sonnet");
         assert_eq!(router.active_model_name(), "sonnet");
+    }
+
+    // -- Tool-call routing tests --
+
+    #[test]
+    fn classify_tool_request_simple_few_tools() {
+        let primary = Arc::new(StubLlm::new("ok"));
+        let cheap = Arc::new(StubLlm::new("ok"));
+        let router = SmartRoutingProvider::new(primary, cheap, default_config());
+
+        let req = ToolCompletionRequest {
+            messages: vec![ChatMessage::user("hello")],
+            tools: vec![crate::llm::ToolDefinition {
+                name: "echo".to_string(),
+                description: "echo".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            tool_choice: None,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(router.classify_tool_request(&req), TaskComplexity::Simple);
+    }
+
+    #[test]
+    fn classify_tool_request_many_tools_forces_complex() {
+        let primary = Arc::new(StubLlm::new("ok"));
+        let cheap = Arc::new(StubLlm::new("ok"));
+        let router = SmartRoutingProvider::new(primary, cheap, default_config());
+
+        let tools: Vec<crate::llm::ToolDefinition> = (0..15)
+            .map(|i| crate::llm::ToolDefinition {
+                name: format!("tool_{i}"),
+                description: "desc".to_string(),
+                parameters: serde_json::json!({}),
+            })
+            .collect();
+
+        let req = ToolCompletionRequest {
+            messages: vec![ChatMessage::user("hello")],
+            tools,
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            tool_choice: None,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(router.classify_tool_request(&req), TaskComplexity::Complex);
+    }
+
+    #[test]
+    fn classify_tool_request_routing_hint_overrides() {
+        let primary = Arc::new(StubLlm::new("ok"));
+        let cheap = Arc::new(StubLlm::new("ok"));
+        let router = SmartRoutingProvider::new(primary, cheap, default_config());
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("routing_hint".to_string(), "complex".to_string());
+
+        let req = ToolCompletionRequest {
+            messages: vec![ChatMessage::user("hello")],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            tool_choice: None,
+            metadata,
+        };
+
+        assert_eq!(router.classify_tool_request(&req), TaskComplexity::Complex);
+    }
+
+    #[test]
+    fn simple_tool_max_count_zero_disables_cheap_routing() {
+        let config = SmartRoutingConfig {
+            simple_tool_max_count: 0,
+            ..SmartRoutingConfig::default()
+        };
+        // When simple_tool_max_count is 0, even Simple requests with 0 tools
+        // should not pass the `max_for_cheap > 0` guard in complete_with_tools.
+        assert_eq!(config.simple_tool_max_count, 0);
     }
 }

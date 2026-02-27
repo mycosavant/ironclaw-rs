@@ -36,6 +36,10 @@ pub struct ActionRecord {
     pub error: Option<String>,
     /// When the action was executed.
     pub executed_at: DateTime<Utc>,
+    /// Blake3 hash of canonical action fields (tamper-evident audit trail).
+    pub content_hash: Option<String>,
+    /// Content hash of the previous action in the chain (`None` for the first action).
+    pub prev_hash: Option<String>,
 }
 
 impl ActionRecord {
@@ -54,7 +58,27 @@ impl ActionRecord {
             success: false,
             error: None,
             executed_at: Utc::now(),
+            content_hash: None,
+            prev_hash: None,
         }
+    }
+
+    /// Compute and set the content hash, linking to the previous action's hash.
+    ///
+    /// The canonical representation hashed is:
+    /// `job_id|sequence|tool_name|json(input)|executed_at_rfc3339`
+    pub fn seal(&mut self, job_id: Uuid, prev_hash: Option<&str>) {
+        let canonical = format!(
+            "{}|{}|{}|{}|{}",
+            job_id,
+            self.sequence,
+            self.tool_name,
+            self.input,
+            self.executed_at.to_rfc3339(),
+        );
+        let hash = blake3::hash(canonical.as_bytes());
+        self.content_hash = Some(format!("blake3:{}", hash.to_hex()));
+        self.prev_hash = prev_hash.map(String::from);
     }
 
     /// Mark the action as successful.
@@ -196,8 +220,10 @@ impl Memory {
         ActionRecord::new(seq, tool_name, input)
     }
 
-    /// Record a completed action.
-    pub fn record_action(&mut self, action: ActionRecord) {
+    /// Record a completed action, sealing it into the hash chain.
+    pub fn record_action(&mut self, mut action: ActionRecord) {
+        let prev = self.actions.last().and_then(|a| a.content_hash.as_deref());
+        action.seal(self.job_id, prev);
         self.actions.push(action);
     }
 

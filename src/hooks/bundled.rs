@@ -21,13 +21,15 @@ const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_WEBHOOK_MAX_IN_FLIGHT: usize = 32;
 const MAX_HOOK_TIMEOUT_MS: u64 = 30_000;
 
-const ALL_HOOK_POINTS: [HookPoint; 6] = [
+const ALL_HOOK_POINTS: [HookPoint; 8] = [
     HookPoint::BeforeInbound,
     HookPoint::BeforeToolCall,
     HookPoint::BeforeOutbound,
     HookPoint::OnSessionStart,
     HookPoint::OnSessionEnd,
     HookPoint::TransformResponse,
+    HookPoint::BeforeLlmCall,
+    HookPoint::AfterLlmResponse,
 ];
 
 /// Errors while parsing or compiling declarative hook bundles.
@@ -525,6 +527,15 @@ enum OutboundWebhookEventSummary {
         role: String,
         content_length: usize,
     },
+    LlmCall {
+        model: String,
+        messages_length: usize,
+    },
+    LlmResponse {
+        model: String,
+        content_length: usize,
+        finish_reason: String,
+    },
 }
 
 #[async_trait]
@@ -664,6 +675,22 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
                 response_length: response.len(),
             }
         }
+        HookEvent::LlmCall {
+            model, messages, ..
+        } => OutboundWebhookEventSummary::LlmCall {
+            model: model.clone(),
+            messages_length: messages.len(),
+        },
+        HookEvent::LlmResponse {
+            model,
+            content,
+            finish_reason,
+            ..
+        } => OutboundWebhookEventSummary::LlmResponse {
+            model: model.clone(),
+            content_length: content.len(),
+            finish_reason: finish_reason.clone(),
+        },
     }
 }
 
@@ -911,7 +938,9 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::SessionEnd { user_id, .. }
         | HookEvent::ResponseTransform { user_id, .. }
         | HookEvent::AgentStart { user_id, .. }
-        | HookEvent::MessageWrite { user_id, .. } => user_id,
+        | HookEvent::MessageWrite { user_id, .. }
+        | HookEvent::LlmCall { user_id, .. }
+        | HookEvent::LlmResponse { user_id, .. } => user_id,
     }
 }
 
@@ -927,6 +956,8 @@ fn extract_primary_content(event: &HookEvent) -> String {
         HookEvent::ResponseTransform { response, .. } => response.clone(),
         HookEvent::AgentStart { model, .. } => model.clone(),
         HookEvent::MessageWrite { content, .. } => content.clone(),
+        HookEvent::LlmCall { messages, .. } => messages.clone(),
+        HookEvent::LlmResponse { content, .. } => content.clone(),
     }
 }
 

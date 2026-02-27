@@ -309,8 +309,9 @@ impl Store {
             r#"
             INSERT INTO job_actions (
                 id, job_id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                sanitization_warnings, cost, duration_ms, success, error_message, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                content_hash, prev_hash
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
             &[
                 &action.id,
@@ -326,6 +327,8 @@ impl Store {
                 &action.success,
                 &action.error,
                 &action.executed_at,
+                &action.content_hash,
+                &action.prev_hash,
             ],
         )
         .await?;
@@ -341,7 +344,8 @@ impl Store {
             .query(
                 r#"
                 SELECT id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                       sanitization_warnings, cost, duration_ms, success, error_message, created_at
+                       sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                       content_hash, prev_hash
                 FROM job_actions WHERE job_id = $1 ORDER BY sequence_num
                 "#,
                 &[&job_id],
@@ -367,6 +371,8 @@ impl Store {
                 success: row.get("success"),
                 error: row.get("error_message"),
                 executed_at: row.get("created_at"),
+                content_hash: row.get("content_hash"),
+                prev_hash: row.get("prev_hash"),
             });
         }
 
@@ -1220,6 +1226,7 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
             on_attention: row.get("notify_on_attention"),
             on_failure: row.get("notify_on_failure"),
             on_success: row.get("notify_on_success"),
+            on_completion_webhook: row.try_get("notify_webhook_url").ok().flatten(),
         },
         last_run_at: row.get("last_run_at"),
         next_fire_at: row.get("next_fire_at"),
