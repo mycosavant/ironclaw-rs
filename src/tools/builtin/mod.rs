@@ -13,6 +13,10 @@ pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
 pub mod vision;
+pub mod workflow;
+
+#[cfg(feature = "browser")]
+pub mod browser;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -37,6 +41,13 @@ pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSea
 pub use time::TimeTool;
 #[cfg(feature = "media")]
 pub use vision::ImageAnalyzeTool;
+pub use workflow::{WorkflowCreateTool, WorkflowListTool, WorkflowRunTool, WorkflowStatusTool};
+
+#[cfg(feature = "browser")]
+pub use browser::{
+    BrowserClickTool, BrowserCloseTool, BrowserNavigateTool, BrowserReadPageTool,
+    BrowserScreenshotTool, BrowserSessionManager, BrowserTypeTool,
+};
 
 mod html_converter;
 

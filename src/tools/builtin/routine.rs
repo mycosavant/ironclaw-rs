@@ -87,8 +87,16 @@ impl Tool for RoutineCreateTool {
                 },
                 "action_type": {
                     "type": "string",
-                    "enum": ["lightweight", "full_job"],
-                    "description": "Execution mode: 'lightweight' (single LLM call, default) or 'full_job' (multi-turn with tools)"
+                    "enum": ["lightweight", "full_job", "workflow"],
+                    "description": "Execution mode: 'lightweight' (single LLM call, default), 'full_job' (multi-turn with tools), or 'workflow' (run a named workflow)"
+                },
+                "workflow_name": {
+                    "type": "string",
+                    "description": "Name of the workflow to run (required when action_type is 'workflow')"
+                },
+                "workflow_input": {
+                    "type": "object",
+                    "description": "Input data for the workflow (when action_type is 'workflow')"
                 },
                 "cooldown_secs": {
                     "type": "integer",
@@ -197,6 +205,33 @@ impl Tool for RoutineCreateTool {
                 description: prompt.to_string(),
                 max_iterations: 10,
             },
+            "workflow" => {
+                let wf_name = params
+                    .get("workflow_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(
+                            "action_type 'workflow' requires 'workflow_name'".to_string(),
+                        )
+                    })?;
+                let wf_input = params
+                    .get("workflow_input")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                // Look up the workflow to get its ID
+                let workflow = self
+                    .store
+                    .get_workflow_by_name(&ctx.user_id, wf_name)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(format!("workflow '{wf_name}' not found"))
+                    })?;
+                RoutineAction::Workflow {
+                    workflow_id: workflow.id,
+                    input: wf_input,
+                }
+            }
             other => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unknown action_type: {other}"
@@ -421,6 +456,9 @@ impl Tool for RoutineUpdateTool {
             match &mut routine.action {
                 RoutineAction::Lightweight { prompt: p, .. } => *p = prompt.to_string(),
                 RoutineAction::FullJob { description: d, .. } => *d = prompt.to_string(),
+                RoutineAction::Workflow { .. } => {
+                    // Workflows don't have a prompt field — ignore
+                }
             }
         }
 

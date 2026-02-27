@@ -73,12 +73,22 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_history",
+    "workflow_create",
+    "workflow_run",
+    "workflow_list",
+    "workflow_status",
     "skill_list",
     "skill_search",
     "skill_install",
     "skill_remove",
     "agent_spawn",
     "agent_send",
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+    "browser_screenshot",
+    "browser_read_page",
+    "browser_close",
 ];
 
 /// Registry of available tools.
@@ -478,6 +488,55 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register workflow management tools.
+    pub fn register_workflow_tools(
+        &self,
+        store: Arc<dyn Database>,
+        executor: Arc<crate::agent::workflow::WorkflowExecutor>,
+    ) {
+        use crate::tools::builtin::{
+            WorkflowCreateTool, WorkflowListTool, WorkflowRunTool, WorkflowStatusTool,
+        };
+        self.register_sync(Arc::new(WorkflowCreateTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(WorkflowRunTool::new(
+            Arc::clone(&store),
+            Arc::clone(&executor),
+        )));
+        self.register_sync(Arc::new(WorkflowListTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(WorkflowStatusTool::new(store)));
+        tracing::info!("Registered 4 workflow management tools");
+    }
+
+    /// Register browser automation tools (Playwright-backed).
+    ///
+    /// Provides six tools: navigate, click, type, screenshot, read_page, close.
+    /// Requires `node` and `playwright` installed on the system.
+    #[cfg(feature = "browser")]
+    pub fn register_browser_tools(
+        &self,
+        session_manager: Arc<crate::tools::builtin::browser::BrowserSessionManager>,
+    ) {
+        use crate::tools::builtin::browser::{
+            BrowserClickTool, BrowserCloseTool, BrowserNavigateTool, BrowserReadPageTool,
+            BrowserScreenshotTool, BrowserTypeTool,
+        };
+        self.register_sync(Arc::new(BrowserNavigateTool::new(Arc::clone(
+            &session_manager,
+        ))));
+        self.register_sync(Arc::new(BrowserClickTool::new(Arc::clone(
+            &session_manager,
+        ))));
+        self.register_sync(Arc::new(BrowserTypeTool::new(Arc::clone(&session_manager))));
+        self.register_sync(Arc::new(BrowserScreenshotTool::new(Arc::clone(
+            &session_manager,
+        ))));
+        self.register_sync(Arc::new(BrowserReadPageTool::new(Arc::clone(
+            &session_manager,
+        ))));
+        self.register_sync(Arc::new(BrowserCloseTool::new(session_manager)));
+        tracing::info!("Registered 6 browser automation tools");
     }
 
     /// Register the software builder tool.

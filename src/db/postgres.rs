@@ -13,11 +13,12 @@ use uuid::Uuid;
 
 use crate::agent::BrokenTool;
 use crate::agent::routine::{Routine, RoutineRun, RunStatus};
+use crate::agent::workflow::{Workflow, WorkflowRun};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ToolFailureStore, WorkflowStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -444,6 +445,59 @@ impl RoutineStore for PgBackend {
         job_id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
+    }
+}
+
+// ==================== WorkflowStore ====================
+
+#[async_trait]
+impl WorkflowStore for PgBackend {
+    async fn create_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError> {
+        self.store.create_workflow(workflow).await
+    }
+
+    async fn get_workflow(&self, id: Uuid) -> Result<Option<Workflow>, DatabaseError> {
+        self.store.get_workflow(id).await
+    }
+
+    async fn get_workflow_by_name(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<Workflow>, DatabaseError> {
+        self.store.get_workflow_by_name(user_id, name).await
+    }
+
+    async fn list_workflows(&self, user_id: &str) -> Result<Vec<Workflow>, DatabaseError> {
+        self.store.list_workflows(user_id).await
+    }
+
+    async fn update_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError> {
+        self.store.update_workflow(workflow).await
+    }
+
+    async fn delete_workflow(&self, id: Uuid) -> Result<bool, DatabaseError> {
+        self.store.delete_workflow(id).await
+    }
+
+    async fn create_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError> {
+        self.store.create_workflow_run(run).await
+    }
+
+    async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRun>, DatabaseError> {
+        self.store.get_workflow_run(id).await
+    }
+
+    async fn update_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError> {
+        self.store.update_workflow_run(run).await
+    }
+
+    async fn list_workflow_runs(
+        &self,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<WorkflowRun>, DatabaseError> {
+        self.store.list_workflow_runs(workflow_id, limit).await
     }
 }
 

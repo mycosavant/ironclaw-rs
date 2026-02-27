@@ -51,6 +51,9 @@ pub enum Error {
 
     #[error("Routine error: {0}")]
     Routine(#[from] RoutineError),
+
+    #[error("Workflow error: {0}")]
+    Workflow(#[from] WorkflowError),
 }
 
 /// Configuration-related errors.
@@ -428,6 +431,40 @@ pub enum RoutineError {
 
     #[error("LLM response truncated (finish_reason=length) with no content")]
     TruncatedResponse,
+}
+
+/// Workflow-related errors.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowError {
+    #[error("Workflow not found: {id}")]
+    NotFound { id: Uuid },
+
+    #[error("Workflow validation failed: {reason}")]
+    Validation { reason: String },
+
+    #[error("Workflow step '{step_id}' failed: {reason}")]
+    StepFailed { step_id: String, reason: String },
+
+    #[error("Template error: {reason}")]
+    TemplateError { reason: String },
+
+    #[error("Loop exhausted after {max_iterations} iterations in step '{step_id}'")]
+    LoopExhausted {
+        step_id: String,
+        max_iterations: u32,
+    },
+
+    #[error("Database error: {0}")]
+    Database(#[from] DatabaseError),
+
+    #[error("Tool error: {0}")]
+    ToolError(String),
+
+    #[error("LLM call failed: {0}")]
+    LlmFailed(String),
+
+    #[error("Workflow cancelled")]
+    Cancelled,
 }
 
 /// Result type alias for the agent.

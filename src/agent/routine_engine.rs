@@ -369,6 +369,9 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             description,
             max_iterations,
         } => execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await,
+        RoutineAction::Workflow { workflow_id, input } => {
+            execute_workflow(&ctx, &routine, &run, *workflow_id, input.clone()).await
+        }
     };
 
     // Decrement running count
@@ -495,6 +498,74 @@ async fn execute_full_job(
         "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
     );
     Ok((RunStatus::Ok, Some(summary), None))
+}
+
+/// Execute a workflow routine by loading and running the referenced workflow.
+async fn execute_workflow(
+    ctx: &EngineContext,
+    routine: &Routine,
+    run: &RoutineRun,
+    workflow_id: uuid::Uuid,
+    input: serde_json::Value,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let scheduler = ctx
+        .scheduler
+        .as_ref()
+        .ok_or_else(|| RoutineError::JobDispatchFailed {
+            reason: "scheduler not available (needed for workflow executor)".to_string(),
+        })?;
+
+    // Load the workflow definition
+    let workflow = ctx
+        .store
+        .get_workflow(workflow_id)
+        .await
+        .map_err(|e| RoutineError::JobDispatchFailed {
+            reason: format!("failed to load workflow: {e}"),
+        })?
+        .ok_or_else(|| RoutineError::JobDispatchFailed {
+            reason: format!("workflow {workflow_id} not found"),
+        })?;
+
+    // Create a workflow run
+    let mut wf_run = crate::agent::workflow::WorkflowRun {
+        id: uuid::Uuid::new_v4(),
+        workflow_id,
+        user_id: routine.user_id.clone(),
+        input,
+        outputs: std::collections::HashMap::new(),
+        status: crate::agent::workflow::WorkflowRunStatus::Running,
+        current_step: None,
+        error: None,
+        started_at: chrono::Utc::now(),
+        completed_at: None,
+        routine_run_id: Some(run.id),
+    };
+
+    ctx.store
+        .create_workflow_run(&wf_run)
+        .await
+        .map_err(|e| RoutineError::JobDispatchFailed {
+            reason: format!("failed to create workflow run: {e}"),
+        })?;
+
+    let executor = crate::agent::workflow::WorkflowExecutor::new(
+        Arc::clone(&ctx.store),
+        Arc::clone(&ctx.llm),
+        Arc::clone(scheduler),
+        Arc::clone(scheduler.tools()),
+    );
+
+    match executor.run(&workflow, &mut wf_run).await {
+        Ok(_outputs) => {
+            let summary = format!("Workflow '{}' completed (run {})", workflow.name, wf_run.id);
+            Ok((RunStatus::Ok, Some(summary), None))
+        }
+        Err(e) => {
+            let summary = format!("Workflow '{}' failed: {e}", workflow.name);
+            Ok((RunStatus::Failed, Some(summary), None))
+        }
+    }
 }
 
 /// Execute a lightweight routine (single LLM call).

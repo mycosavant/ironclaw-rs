@@ -1192,6 +1192,234 @@ impl Store {
     }
 }
 
+// ==================== Workflow Store ====================
+
+#[cfg(feature = "postgres")]
+use crate::agent::workflow::{Workflow, WorkflowRun, WorkflowRunStatus, WorkflowStep};
+
+#[cfg(feature = "postgres")]
+fn row_to_workflow(row: &tokio_postgres::Row) -> Result<Workflow, DatabaseError> {
+    let steps_json: serde_json::Value = row.get("steps");
+    let steps: Vec<WorkflowStep> = serde_json::from_value(steps_json)
+        .map_err(|e| DatabaseError::Serialization(format!("workflow steps: {e}")))?;
+
+    Ok(Workflow {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        user_id: row.get("user_id"),
+        steps,
+        input_schema: row.get("input_schema"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_workflow_run(row: &tokio_postgres::Row) -> Result<WorkflowRun, DatabaseError> {
+    let status_str: String = row.get("status");
+    let status: WorkflowRunStatus = status_str
+        .parse()
+        .map_err(|e: String| DatabaseError::Serialization(e))?;
+
+    let outputs_json: serde_json::Value = row.get("outputs");
+    let outputs: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_value(outputs_json)
+            .map_err(|e| DatabaseError::Serialization(format!("workflow run outputs: {e}")))?;
+
+    Ok(WorkflowRun {
+        id: row.get("id"),
+        workflow_id: row.get("workflow_id"),
+        user_id: row.get("user_id"),
+        input: row.get("input"),
+        outputs,
+        status,
+        current_step: row.get("current_step"),
+        error: row.get("error"),
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
+        routine_run_id: row.get("routine_run_id"),
+    })
+}
+
+#[cfg(feature = "postgres")]
+impl Store {
+    pub async fn create_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let steps_json = serde_json::to_value(&workflow.steps)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute(
+            r#"
+            INSERT INTO workflows (id, name, description, user_id, steps, input_schema, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+            &[
+                &workflow.id,
+                &workflow.name,
+                &workflow.description,
+                &workflow.user_id,
+                &steps_json,
+                &workflow.input_schema,
+                &workflow.created_at,
+                &workflow.updated_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workflow(&self, id: Uuid) -> Result<Option<Workflow>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT * FROM workflows WHERE id = $1", &[&id])
+            .await?;
+        row.map(|r| row_to_workflow(&r)).transpose()
+    }
+
+    pub async fn get_workflow_by_name(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<Workflow>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM workflows WHERE user_id = $1 AND name = $2",
+                &[&user_id, &name],
+            )
+            .await?;
+        row.map(|r| row_to_workflow(&r)).transpose()
+    }
+
+    pub async fn list_workflows(&self, user_id: &str) -> Result<Vec<Workflow>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM workflows WHERE user_id = $1 ORDER BY name",
+                &[&user_id],
+            )
+            .await?;
+        rows.iter().map(row_to_workflow).collect()
+    }
+
+    pub async fn update_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let steps_json = serde_json::to_value(&workflow.steps)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute(
+            r#"
+            UPDATE workflows SET
+                name = $2, description = $3, steps = $4,
+                input_schema = $5, updated_at = now()
+            WHERE id = $1
+            "#,
+            &[
+                &workflow.id,
+                &workflow.name,
+                &workflow.description,
+                &steps_json,
+                &workflow.input_schema,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_workflow(&self, id: Uuid) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute("DELETE FROM workflows WHERE id = $1", &[&id])
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn create_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let outputs_json = serde_json::to_value(&run.outputs)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let status = run.status.to_string();
+
+        conn.execute(
+            r#"
+            INSERT INTO workflow_runs (
+                id, workflow_id, user_id, input, outputs, status,
+                current_step, error, started_at, completed_at, routine_run_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+            &[
+                &run.id,
+                &run.workflow_id,
+                &run.user_id,
+                &run.input,
+                &outputs_json,
+                &status,
+                &run.current_step,
+                &run.error,
+                &run.started_at,
+                &run.completed_at,
+                &run.routine_run_id,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT * FROM workflow_runs WHERE id = $1", &[&id])
+            .await?;
+        row.map(|r| row_to_workflow_run(&r)).transpose()
+    }
+
+    pub async fn update_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let outputs_json = serde_json::to_value(&run.outputs)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let status = run.status.to_string();
+
+        conn.execute(
+            r#"
+            UPDATE workflow_runs SET
+                outputs = $2, status = $3, current_step = $4, error = $5, completed_at = $6
+            WHERE id = $1
+            "#,
+            &[
+                &run.id,
+                &outputs_json,
+                &status,
+                &run.current_step,
+                &run.error,
+                &run.completed_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_workflow_runs(
+        &self,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<WorkflowRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM workflow_runs
+                WHERE workflow_id = $1
+                ORDER BY started_at DESC
+                LIMIT $2
+                "#,
+                &[&workflow_id, &limit],
+            )
+            .await?;
+        rows.iter().map(row_to_workflow_run).collect()
+    }
+}
+
 #[cfg(feature = "postgres")]
 fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
     let trigger_type: String = row.get("trigger_type");

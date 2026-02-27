@@ -203,6 +203,9 @@ fn action_label(a: &RoutineAction) -> String {
             )
         }
         RoutineAction::FullJob { title, .. } => format!("full_job: \"{}\"", title),
+        RoutineAction::Workflow { workflow_id, .. } => {
+            format!("workflow: {}", workflow_id)
+        }
     }
 }
 
@@ -430,6 +433,9 @@ async fn edit(
                     description: p,
                     max_iterations: *max_iterations,
                 };
+            }
+            RoutineAction::Workflow { .. } => {
+                // Workflows don't have a prompt field
             }
         }
     }

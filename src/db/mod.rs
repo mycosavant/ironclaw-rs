@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::agent::BrokenTool;
 use crate::agent::routine::{Routine, RoutineRun, RunStatus};
+use crate::agent::workflow::{Workflow, WorkflowRun};
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
@@ -295,6 +296,28 @@ pub trait RoutineStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait WorkflowStore: Send + Sync {
+    async fn create_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError>;
+    async fn get_workflow(&self, id: Uuid) -> Result<Option<Workflow>, DatabaseError>;
+    async fn get_workflow_by_name(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<Workflow>, DatabaseError>;
+    async fn list_workflows(&self, user_id: &str) -> Result<Vec<Workflow>, DatabaseError>;
+    async fn update_workflow(&self, workflow: &Workflow) -> Result<(), DatabaseError>;
+    async fn delete_workflow(&self, id: Uuid) -> Result<bool, DatabaseError>;
+    async fn create_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError>;
+    async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRun>, DatabaseError>;
+    async fn update_workflow_run(&self, run: &WorkflowRun) -> Result<(), DatabaseError>;
+    async fn list_workflow_runs(
+        &self,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<WorkflowRun>, DatabaseError>;
+}
+
+#[async_trait]
 pub trait ToolFailureStore: Send + Sync {
     async fn record_tool_failure(
         &self,
@@ -415,6 +438,7 @@ pub trait Database:
     + JobStore
     + SandboxStore
     + RoutineStore
+    + WorkflowStore
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore

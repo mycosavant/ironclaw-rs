@@ -176,6 +176,14 @@ pub enum RoutineAction {
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
     },
+    /// Execute a multi-step workflow.
+    Workflow {
+        /// ID of the workflow definition to run.
+        workflow_id: uuid::Uuid,
+        /// Input data passed to the workflow.
+        #[serde(default)]
+        input: serde_json::Value,
+    },
 }
 
 fn default_max_tokens() -> u32 {
@@ -192,6 +200,7 @@ impl RoutineAction {
         match self {
             RoutineAction::Lightweight { .. } => "lightweight",
             RoutineAction::FullJob { .. } => "full_job",
+            RoutineAction::Workflow { .. } => "workflow",
         }
     }
 
@@ -254,6 +263,27 @@ impl RoutineAction {
                     max_iterations,
                 })
             }
+            "workflow" => {
+                let workflow_id_str = config
+                    .get("workflow_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "workflow action".into(),
+                        field: "workflow_id".into(),
+                    })?;
+                let workflow_id =
+                    workflow_id_str
+                        .parse()
+                        .map_err(|_| RoutineError::MissingField {
+                            context: "workflow action".into(),
+                            field: "workflow_id (invalid UUID)".into(),
+                        })?;
+                let input = config
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                Ok(RoutineAction::Workflow { workflow_id, input })
+            }
             other => Err(RoutineError::UnknownActionType {
                 action_type: other.to_string(),
             }),
@@ -280,6 +310,10 @@ impl RoutineAction {
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
+            }),
+            RoutineAction::Workflow { workflow_id, input } => serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "input": input,
             }),
         }
     }

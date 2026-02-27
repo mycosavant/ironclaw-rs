@@ -527,6 +527,18 @@ impl Agent {
                         .tools
                         .register_routine_tools(Arc::clone(store), Arc::clone(&engine));
 
+                    // Register workflow tools
+                    let workflow_executor =
+                        Arc::new(crate::agent::workflow::WorkflowExecutor::new(
+                            Arc::clone(store),
+                            self.deps.llm.clone(),
+                            self.scheduler.clone(),
+                            self.deps.tools.clone(),
+                        ));
+                    self.deps
+                        .tools
+                        .register_workflow_tools(Arc::clone(store), workflow_executor);
+
                     // Load initial event cache
                     engine.refresh_event_cache().await;
 
