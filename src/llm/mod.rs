@@ -359,24 +359,42 @@ fn create_cheap_provider_for_backend(
                 config.thinking.clone(),
             )?))
         }
-        _ => {
-            // For all other backends, create a NearAI-based cheap provider using the
-            // cheap model name. This works because the NEAR AI provider speaks the
-            // OpenAI-compatible protocol.  A future enhancement could create a native
-            // cheap provider for each backend.
-            let mut cheap_config = config.nearai.clone();
-            cheap_config.model = cheap_model.to_string();
-            tracing::info!(
-                backend = %config.backend,
-                cheap_model = cheap_model,
-                "Smart routing: using NEAR AI-based cheap provider for non-NEAR backend"
-            );
-            Ok(Arc::new(NearAiChatProvider::new_with_options(
-                cheap_config,
-                session,
-                true,
-                config.thinking.clone(),
-            )?))
+        LlmBackend::OpenAi => {
+            let mut cheap = config.clone();
+            if let Some(ref mut oai) = cheap.openai {
+                oai.model = cheap_model.to_string();
+            }
+            create_openai_provider(&cheap)
+        }
+        LlmBackend::Anthropic => {
+            let mut cheap = config.clone();
+            if let Some(ref mut anth) = cheap.anthropic {
+                anth.model = cheap_model.to_string();
+            }
+            // Disable thinking for cheap models — they're meant to be fast/inexpensive.
+            cheap.thinking = crate::config::ThinkingConfig::default();
+            create_anthropic_provider(&cheap)
+        }
+        LlmBackend::Ollama => {
+            let mut cheap = config.clone();
+            if let Some(ref mut oll) = cheap.ollama {
+                oll.model = cheap_model.to_string();
+            }
+            create_ollama_provider(&cheap)
+        }
+        LlmBackend::OpenAiCompatible => {
+            let mut cheap = config.clone();
+            if let Some(ref mut compat) = cheap.openai_compatible {
+                compat.model = cheap_model.to_string();
+            }
+            create_openai_compatible_provider(&cheap)
+        }
+        LlmBackend::Tinfoil => {
+            let mut cheap = config.clone();
+            if let Some(ref mut tf) = cheap.tinfoil {
+                tf.model = cheap_model.to_string();
+            }
+            create_tinfoil_provider(&cheap)
         }
     }
 }

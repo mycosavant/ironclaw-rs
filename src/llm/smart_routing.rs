@@ -76,8 +76,13 @@ impl SmartRoutingStats {
 }
 
 /// Snapshot of routing statistics for external consumption.
+///
+/// `total_requests` counts LLM API calls, not logical user requests.
+/// On cascade escalation a single user request produces two API calls
+/// (cheap attempt + primary retry), so `cheap_requests + primary_requests == total_requests`.
 #[derive(Debug, Clone)]
 pub struct SmartRoutingSnapshot {
+    /// Total LLM API calls. Cascade escalations count twice (cheap + primary).
     pub total_requests: u64,
     pub cheap_requests: u64,
     pub primary_requests: u64,
@@ -345,6 +350,9 @@ impl LlmProvider for SmartRoutingProvider {
                             .cascade_escalations
                             .fetch_add(1, Ordering::Relaxed);
                         self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
+                        // Count the escalation as a separate request so that
+                        // cheap_requests + primary_requests == total_requests
+                        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
                         self.primary.complete(request).await
                     } else {
                         Ok(response)
