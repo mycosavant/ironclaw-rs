@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 
+use crate::agent::cycle_guard::CycleGuard;
 use crate::agent::scheduler::Scheduler;
 use crate::agent::workflow::compiler::validate_workflow;
 use crate::agent::workflow::types::{
@@ -35,6 +36,10 @@ pub struct WorkflowExecutor {
     tools: Arc<ToolRegistry>,
     safety: Option<Arc<SafetyLayer>>,
     timeout: Duration,
+    /// Per-run tool-call cycle detection. Uses `std::sync::Mutex` (not tokio)
+    /// because the lock is held only for the brief hash+check, never across
+    /// an `.await` point.
+    cycle_guard: Option<std::sync::Mutex<CycleGuard>>,
 }
 
 impl WorkflowExecutor {
@@ -51,6 +56,7 @@ impl WorkflowExecutor {
             tools,
             safety: None,
             timeout: DEFAULT_WORKFLOW_TIMEOUT,
+            cycle_guard: None,
         }
     }
 
@@ -63,6 +69,16 @@ impl WorkflowExecutor {
     /// Set a custom workflow-level timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Enable SHA-256 cycle detection for repeated tool calls.
+    ///
+    /// `window_size` controls the sliding window depth (default 8 in the
+    /// main agent loop). A cycle is detected when a repeating pattern
+    /// appears in the most recent `window_size` tool calls.
+    pub fn with_cycle_guard(mut self, window_size: usize) -> Self {
+        self.cycle_guard = Some(std::sync::Mutex::new(CycleGuard::new(window_size)));
         self
     }
 
@@ -202,11 +218,18 @@ impl WorkflowExecutor {
                     let scheduler = Arc::clone(&self.scheduler);
                     let tools = Arc::clone(&self.tools);
                     let safety = self.safety.clone();
+                    let cycle_window = self
+                        .cycle_guard
+                        .as_ref()
+                        .and_then(|g| g.lock().ok().map(|g| g.window_size()));
 
                     set.spawn(async move {
                         let mut executor = WorkflowExecutor::new(store, llm, scheduler, tools);
                         if let Some(s) = safety {
                             executor = executor.with_safety(s);
+                        }
+                        if let Some(ws) = cycle_window {
+                            executor = executor.with_cycle_guard(ws);
                         }
                         let mut local_outputs = branch_outputs;
                         for step in &branch {
@@ -269,9 +292,9 @@ impl WorkflowExecutor {
                 exit_condition,
                 max_iterations,
             } => {
-                // Cycle detection relies on max_iterations rather than the SHA-256
-                // guard because the workflow executor uses a different execution
-                // path than the main agent loop.
+                // Loop termination relies primarily on max_iterations. When a
+                // CycleGuard is configured, it provides an additional defence
+                // against repeating tool-call patterns within the loop body.
                 for iteration in 0..*max_iterations {
                     for step in steps {
                         self.execute_step(step, outputs, user_id, depth + 1).await?;
@@ -340,19 +363,28 @@ impl WorkflowExecutor {
 
     /// Execute a tool by name with resolved parameters.
     ///
-    /// NOTE: This routes directly through the `ToolRegistry`, bypassing the
-    /// SHA-256 cycle guard used in the main agent loop (`Worker`). Repeated
-    /// identical tool calls within a workflow loop rely on `max_iterations`
-    /// for termination rather than cycle detection. Per-step audit records
-    /// are not written here — only the top-level `workflow_run` invocation
-    /// is recorded in the Merkle hash-chain. See M9/M10 in the production
-    /// readiness audit for rationale.
+    /// When a `CycleGuard` is configured (via `with_cycle_guard`), tool calls
+    /// are checked against the sliding window before execution. Repeated
+    /// patterns trigger `WorkflowError::CycleDetected`.
     async fn execute_tool(
         &self,
         tool_name: &str,
         params: serde_json::Value,
         user_id: &str,
     ) -> Result<serde_json::Value, WorkflowError> {
+        // Check for repeating tool-call patterns.
+        if let Some(ref guard) = self.cycle_guard {
+            let is_cycle = guard
+                .lock()
+                .map(|mut g| g.record_and_check_selections(&[(tool_name, &params)]))
+                .unwrap_or(false);
+            if is_cycle {
+                return Err(WorkflowError::CycleDetected {
+                    tool_name: tool_name.to_string(),
+                });
+            }
+        }
+
         let tool = self
             .tools
             .get(tool_name)

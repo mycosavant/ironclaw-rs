@@ -471,6 +471,9 @@ pub enum WorkflowError {
 
     #[error("Safety policy blocked tool output in step '{step_id}': {reason}")]
     SafetyBlocked { step_id: String, reason: String },
+
+    #[error("Cycle detected: tool '{tool_name}' is repeating a pattern")]
+    CycleDetected { tool_name: String },
 }
 
 /// Browser automation errors.

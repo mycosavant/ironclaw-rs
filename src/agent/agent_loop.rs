@@ -88,6 +88,8 @@ pub struct AgentDeps {
         Option<tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>>,
     /// Inter-agent message bus for routed per-job communication.
     pub agent_bus: Option<crate::agent::messaging::AgentMessageBus>,
+    /// Gateway state for late-binding the routine engine after it is created.
+    pub gateway_state: Option<Arc<crate::channels::web::server::GatewayState>>,
 }
 
 /// The main agent that coordinates all components.
@@ -523,6 +525,11 @@ impl Agent {
                     }
                     let engine = Arc::new(engine_inner);
 
+                    // Publish engine to gateway state for REST trigger handler.
+                    if let Some(ref gs) = self.deps.gateway_state {
+                        *gs.routine_engine.write().await = Some(Arc::clone(&engine));
+                    }
+
                     // Register routine tools
                     self.deps
                         .tools
@@ -592,7 +599,8 @@ impl Agent {
                     self.scheduler.clone(),
                     self.deps.tools.clone(),
                 )
-                .with_safety(self.deps.safety.clone()),
+                .with_safety(self.deps.safety.clone())
+                .with_cycle_guard(self.config.cycle_window_size),
             );
             self.deps
                 .tools

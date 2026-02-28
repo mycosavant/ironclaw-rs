@@ -219,6 +219,14 @@ pub struct GatewayState {
     pub trusted_proxy_header: Option<String>,
     /// RBAC role assignments from config.
     pub roles: std::collections::HashMap<String, crate::channels::web::rbac::Role>,
+    /// Routine engine for firing routines through the proper execution path.
+    ///
+    /// Set after the agent starts (the engine is created inside `Agent::run()`).
+    /// When `Some`, the trigger handler calls `fire_manual()` which records runs,
+    /// checks concurrency, and executes through the engine. When `None`, falls
+    /// back to the chat-message pipeline.
+    pub routine_engine:
+        tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>,
 }
 
 /// Start the gateway HTTP server.
@@ -1359,16 +1367,9 @@ async fn chat_new_thread_handler(
 
 // --- Memory handlers ---
 
-#[derive(Deserialize)]
-struct TreeQuery {
-    #[allow(dead_code)]
-    depth: Option<usize>,
-}
-
 async fn memory_tree_handler(
     Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-    Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
     require_permission(role, Permission::ViewMemory)?;
     let workspace = state.workspace.as_ref().ok_or((
@@ -2976,26 +2977,48 @@ async fn routines_trigger_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     require_permission(role, Permission::TriggerRoutine)?;
 
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    // Verify ownership before firing.
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
     let routine = store
         .get_routine(routine_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    // Verify ownership: return 404 (not 403) to avoid leaking existence.
     if routine.user_id != state.user_id {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
-    // Send the routine prompt through the message pipeline as a manual trigger.
+    // Use the routine engine when available — it records runs, checks
+    // concurrency limits, and executes through the proper engine path.
+    if let Some(ref engine) = *state.routine_engine.read().await {
+        let run_id = engine.fire_manual(routine_id).await.map_err(|e| {
+            use crate::error::RoutineError;
+            match &e {
+                RoutineError::NotFound { .. } => (StatusCode::NOT_FOUND, e.to_string()),
+                RoutineError::Disabled { .. } => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+                RoutineError::MaxConcurrent { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, e.to_string())
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        })?;
+
+        return Ok(Json(serde_json::json!({
+            "status": "triggered",
+            "routine_id": routine_id,
+            "run_id": run_id,
+        })));
+    }
+
+    // Fallback: send the routine prompt through the message pipeline.
+    // This path is used when the routine engine is not available (e.g.,
+    // routines disabled or engine not yet initialized).
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
         crate::agent::routine::RoutineAction::FullJob {
@@ -3023,7 +3046,7 @@ async fn routines_trigger_handler(
     })?;
 
     Ok(Json(serde_json::json!({
-        "status": "triggered",
+        "status": "queued",
         "routine_id": routine_id,
     })))
 }
@@ -3093,7 +3116,37 @@ async fn public_webhook_handler(
         ));
     }
 
-    // Fire the routine via the message pipeline.
+    // Use the routine engine when available — records runs and checks concurrency.
+    if let Some(ref engine) = *state.routine_engine.read().await {
+        let run_id = engine.fire_manual(routine.id).await.map_err(|e| {
+            use crate::error::RoutineError;
+            match &e {
+                RoutineError::NotFound { .. } => (StatusCode::NOT_FOUND, e.to_string()),
+                RoutineError::Disabled { .. } => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+                RoutineError::MaxConcurrent { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, e.to_string())
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        })?;
+
+        tracing::info!(
+            routine_id = %routine.id,
+            routine_name = %routine.name,
+            path = %webhook_path,
+            %run_id,
+            "Webhook triggered routine via engine"
+        );
+
+        return Ok(Json(serde_json::json!({
+            "status": "triggered",
+            "routine_id": routine.id,
+            "routine_name": routine.name,
+            "run_id": run_id,
+        })));
+    }
+
+    // Fallback: send via message pipeline when engine is not available.
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
         crate::agent::routine::RoutineAction::FullJob {

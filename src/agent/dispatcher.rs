@@ -1041,6 +1041,7 @@ mod tests {
             repair_tick: None,
             job_event_tx: None,
             agent_bus: None,
+            gateway_state: None,
         };
 
         Agent::new(

@@ -1301,6 +1301,9 @@ pub struct AgentSpawnTool {
     scheduler: Arc<Scheduler>,
     context_manager: Arc<ContextManager>,
     max_child_agents: usize,
+    /// Serializes the check-count + dispatch sequence to prevent TOCTOU races
+    /// where two concurrent spawns both read `active = max - 1` and both proceed.
+    spawn_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentSpawnTool {
@@ -1313,17 +1316,13 @@ impl AgentSpawnTool {
             scheduler,
             context_manager,
             max_child_agents,
+            spawn_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Count active child agents for a given parent job.
     ///
-    /// NOTE: This check is not atomic with dispatch_job(). Two concurrent
-    /// agent_spawn calls could both read `active = max - 1`, pass the check,
-    /// and both dispatch — briefly exceeding the limit. In practice this is
-    /// low-probability because the worker loop processes one LLM turn at a time
-    /// (parallel tool calls from the same parent are serialized). This limit is
-    /// therefore treated as a soft limit.
+    /// Called under `spawn_lock` to prevent TOCTOU races with `dispatch_job()`.
     async fn active_child_count(&self, parent_job_id: Uuid) -> usize {
         let parent_str = parent_job_id.to_string();
         let all_ids = self.context_manager.all_jobs().await;
@@ -1387,6 +1386,10 @@ impl Tool for AgentSpawnTool {
         let title = require_str(&params, "title")?;
         let description = require_str(&params, "description")?;
 
+        // Hold the spawn lock to make the count-check + dispatch atomic,
+        // preventing TOCTOU races where two concurrent calls both see room.
+        let _guard = self.spawn_lock.lock().await;
+
         // Enforce max child agents.
         let active = self.active_child_count(ctx.job_id).await;
         if active >= self.max_child_agents {
@@ -1413,6 +1416,9 @@ impl Tool for AgentSpawnTool {
             .dispatch_job(&ctx.user_id, title, description, Some(meta))
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        // Lock is released here (end of scope).
+        drop(_guard);
 
         let result = serde_json::json!({
             "child_job_id": child_id.to_string(),

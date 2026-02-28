@@ -118,8 +118,8 @@ struct TelegramGetMeResponse {
 #[derive(Debug, Deserialize)]
 struct TelegramUser {
     username: Option<String>,
-    #[allow(dead_code)]
-    first_name: String,
+    #[serde(rename = "first_name")]
+    _first_name: String,
 }
 
 /// Telegram Bot API response for getUpdates.

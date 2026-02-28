@@ -25,6 +25,11 @@ impl CycleGuard {
         }
     }
 
+    /// Returns the configured window size.
+    pub fn window_size(&self) -> usize {
+        self.window_size
+    }
+
     /// Record a batch of tool calls and check for cycles.
     ///
     /// Returns `true` if a repeating pattern was detected.

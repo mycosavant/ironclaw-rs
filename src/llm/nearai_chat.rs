@@ -973,7 +973,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
                 .into_iter()
                 .map(|tc| ChatCompletionToolCall {
                     id: tc.id,
-                    call_type: "function".to_string(),
+                    _call_type: "function".to_string(),
                     function: ChatCompletionToolCallFunction {
                         name: tc.name,
                         arguments: tc.arguments.to_string(),
@@ -1022,9 +1022,8 @@ struct ChatCompletionFunction {
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
-    #[allow(dead_code)]
-    #[serde(default)]
-    id: Option<String>,
+    #[serde(default, rename = "id")]
+    _id: Option<String>,
     choices: Vec<ChatCompletionChoice>,
     #[serde(default)]
     usage: Option<ChatCompletionUsage>,
@@ -1038,8 +1037,8 @@ struct ChatCompletionChoice {
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponseMessage {
-    #[allow(dead_code)]
-    role: String,
+    #[serde(rename = "role")]
+    _role: String,
     content: Option<String>,
     /// Some models (e.g. GLM-5) return chain-of-thought reasoning here
     /// instead of in `content`.
@@ -1052,8 +1051,7 @@ struct ChatCompletionResponseMessage {
 struct ChatCompletionToolCall {
     id: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
-    call_type: String,
+    _call_type: String,
     function: ChatCompletionToolCallFunction,
 }
 
@@ -1431,7 +1429,7 @@ mod tests {
         assert_eq!(tc.len(), 2);
         assert_eq!(tc[0].id, "call_1");
         assert_eq!(tc[0].function.name, "list_issues");
-        assert_eq!(tc[0].call_type, "function");
+        assert_eq!(tc[0]._call_type, "function");
         assert_eq!(tc[1].id, "call_2");
         assert_eq!(tc[1].function.name, "search");
     }
@@ -1503,7 +1501,7 @@ mod tests {
                 name: None,
                 tool_calls: Some(vec![ChatCompletionToolCall {
                     id: "call_1".to_string(),
-                    call_type: "function".to_string(),
+                    _call_type: "function".to_string(),
                     function: ChatCompletionToolCallFunction {
                         name: "echo".to_string(),
                         arguments: r#"{"message":"hi"}"#.to_string(),
@@ -1557,7 +1555,7 @@ mod tests {
                 name: None,
                 tool_calls: Some(vec![ChatCompletionToolCall {
                     id: "call_1".to_string(),
-                    call_type: "function".to_string(),
+                    _call_type: "function".to_string(),
                     function: ChatCompletionToolCallFunction {
                         name: "search".to_string(),
                         arguments: r#"{"q":"test"}"#.to_string(),

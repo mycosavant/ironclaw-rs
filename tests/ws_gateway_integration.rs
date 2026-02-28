@@ -67,6 +67,7 @@ async fn start_test_server() -> (
         session_store: ironclaw::channels::web::session_store::new_session_store(),
         trusted_proxy_header: None,
         roles: std::collections::HashMap::new(),
+        routine_engine: tokio::sync::RwLock::new(None),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

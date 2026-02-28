@@ -701,6 +701,7 @@ mod tests {
             session_store: crate::channels::web::session_store::new_session_store(),
             trusted_proxy_header: None,
             roles: std::collections::HashMap::new(),
+            routine_engine: tokio::sync::RwLock::new(None),
         }
     }
 }

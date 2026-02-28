@@ -105,6 +105,7 @@ impl GatewayChannel {
             channel_health: None,
             trusted_proxy_header: config.trusted_proxy_header.clone(),
             roles: config.roles.clone(),
+            routine_engine: tokio::sync::RwLock::new(None),
         });
 
         Self {
@@ -147,6 +148,7 @@ impl GatewayChannel {
             session_store: self.state.session_store.clone(),
             trusted_proxy_header: self.state.trusted_proxy_header.clone(),
             roles: self.state.roles.clone(),
+            routine_engine: tokio::sync::RwLock::new(None),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

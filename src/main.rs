@@ -685,6 +685,7 @@ async fn main() -> anyhow::Result<()> {
         repair_tick: Some(repair_tick),
         job_event_tx: job_event_tx.clone(),
         agent_bus: agent_bus.clone(),
+        gateway_state: gateway_state_for_health.clone(),
     };
 
     let agent = Agent::new(
