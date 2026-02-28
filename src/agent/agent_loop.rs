@@ -517,6 +517,7 @@ impl Agent {
                         notify_tx,
                         Some(self.scheduler.clone()),
                     );
+                    engine_inner = engine_inner.with_safety(self.deps.safety.clone());
                     if let Some(ref tick) = self.deps.routine_tick {
                         engine_inner = engine_inner.with_last_tick(tick.clone());
                     }
@@ -528,13 +529,15 @@ impl Agent {
                         .register_routine_tools(Arc::clone(store), Arc::clone(&engine));
 
                     // Register workflow tools
-                    let workflow_executor =
-                        Arc::new(crate::agent::workflow::WorkflowExecutor::new(
+                    let workflow_executor = Arc::new(
+                        crate::agent::workflow::WorkflowExecutor::new(
                             Arc::clone(store),
                             self.deps.llm.clone(),
                             self.scheduler.clone(),
                             self.deps.tools.clone(),
-                        ));
+                        )
+                        .with_safety(self.deps.safety.clone()),
+                    );
                     self.deps
                         .tools
                         .register_workflow_tools(Arc::clone(store), workflow_executor);

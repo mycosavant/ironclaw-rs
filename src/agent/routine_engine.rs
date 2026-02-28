@@ -44,6 +44,8 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Safety layer for workflow tool output scanning.
+    safety: Option<Arc<crate::safety::SafetyLayer>>,
     /// Shared atomic updated on each cron tick for external liveness monitoring.
     last_tick: Option<Arc<AtomicI64>>,
 }
@@ -66,8 +68,15 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            safety: None,
             last_tick: None,
         }
+    }
+
+    /// Set the safety layer for workflow tool output scanning.
+    pub fn with_safety(mut self, safety: Arc<crate::safety::SafetyLayer>) -> Self {
+        self.safety = Some(safety);
+        self
     }
 
     /// Set the shared liveness tick atomic (updated on each cron sweep).
@@ -249,6 +258,7 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            safety: self.safety.clone(),
         };
 
         tokio::spawn(async move {
@@ -285,6 +295,7 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            safety: self.safety.clone(),
         };
 
         // Deterministic jitter derived from routine ID so the same routine
@@ -351,12 +362,43 @@ struct EngineContext {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    safety: Option<Arc<crate::safety::SafetyLayer>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
 async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
+
+    // Re-validate: the routine may have been disabled or its user_id cleared
+    // between trigger detection and this spawned execution.
+    if routine.user_id.is_empty() {
+        tracing::warn!(routine = %routine.name, "Skipping execution: routine has empty user_id");
+        ctx.running_count.fetch_sub(1, Ordering::Relaxed);
+        let _ = ctx
+            .store
+            .complete_routine_run(run.id, RunStatus::Failed, Some("empty user_id"), None)
+            .await;
+        update_routine_runtime_on_skip(&ctx, &routine).await;
+        return;
+    }
+    match ctx.store.get_routine(routine.id).await {
+        Ok(Some(fresh)) if !fresh.enabled => {
+            tracing::info!(routine = %routine.name, "Skipping execution: routine was disabled after trigger");
+            ctx.running_count.fetch_sub(1, Ordering::Relaxed);
+            let _ = ctx
+                .store
+                .complete_routine_run(run.id, RunStatus::Failed, Some("routine disabled"), None)
+                .await;
+            update_routine_runtime_on_skip(&ctx, &routine).await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to re-check routine: {e}");
+            // Continue anyway — the routine was valid when triggered.
+        }
+        _ => {}
+    }
 
     let result = match &routine.action {
         RoutineAction::Lightweight {
@@ -433,6 +475,34 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         summary.as_deref(),
     )
     .await;
+}
+
+/// Update routine runtime state after an early-exit skip (empty user, disabled).
+///
+/// Ensures `last_run_at`, `run_count`, `consecutive_failures`, and `next_fire_at`
+/// are updated even when execution is skipped, preventing perpetually-due cron
+/// routines from re-firing on every tick.
+async fn update_routine_runtime_on_skip(ctx: &EngineContext, routine: &Routine) {
+    let now = Utc::now();
+    let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
+        next_cron_fire(schedule).unwrap_or(None)
+    } else {
+        None
+    };
+    if let Err(e) = ctx
+        .store
+        .update_routine_runtime(
+            routine.id,
+            now,
+            next_fire,
+            routine.run_count + 1,
+            routine.consecutive_failures + 1,
+            &routine.state,
+        )
+        .await
+    {
+        tracing::error!(routine = %routine.name, "Failed to update runtime state on skip: {e}");
+    }
 }
 
 /// Sanitize a routine name for use in workspace paths.
@@ -549,12 +619,15 @@ async fn execute_workflow(
             reason: format!("failed to create workflow run: {e}"),
         })?;
 
-    let executor = crate::agent::workflow::WorkflowExecutor::new(
+    let mut executor = crate::agent::workflow::WorkflowExecutor::new(
         Arc::clone(&ctx.store),
         Arc::clone(&ctx.llm),
         Arc::clone(scheduler),
         Arc::clone(scheduler.tools()),
     );
+    if let Some(ref safety) = ctx.safety {
+        executor = executor.with_safety(Arc::clone(safety));
+    }
 
     match executor.run(&workflow, &mut wf_run).await {
         Ok(_outputs) => {
