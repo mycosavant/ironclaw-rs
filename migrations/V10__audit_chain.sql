@@ -4,3 +4,4 @@
 ALTER TABLE job_actions ADD COLUMN content_hash TEXT;
 ALTER TABLE job_actions ADD COLUMN prev_hash TEXT;
 CREATE INDEX IF NOT EXISTS idx_job_actions_content_hash ON job_actions(content_hash);
+CREATE INDEX IF NOT EXISTS idx_job_actions_prev_hash ON job_actions(prev_hash);

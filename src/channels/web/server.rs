@@ -345,6 +345,18 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Workflows
+        .route(
+            "/api/workflows",
+            get(workflows_list_handler).post(workflows_create_handler),
+        )
+        .route(
+            "/api/workflows/{name}",
+            get(workflows_detail_handler)
+                .put(workflows_update_handler)
+                .delete(workflows_delete_handler),
+        )
+        .route("/api/workflows/{name}/runs", get(workflows_runs_handler))
         // Channels
         .route("/api/channels", get(channels_health_handler))
         // Skills
@@ -3049,6 +3061,236 @@ async fn routines_trigger_handler(
         "status": "queued",
         "routine_id": routine_id,
     })))
+}
+
+// ─── Workflow handlers ───────────────────────────────────────────────
+
+async fn workflows_list_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::channels::web::types::WorkflowListResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewWorkflows)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let workflows = store
+        .list_workflows(&state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items = workflows
+        .iter()
+        .map(|w| crate::channels::web::types::WorkflowInfo {
+            id: w.id,
+            name: w.name.clone(),
+            description: w.description.clone(),
+            step_count: w.steps.len(),
+            created_at: w.created_at.to_rfc3339(),
+            updated_at: w.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(crate::channels::web::types::WorkflowListResponse {
+        workflows: items,
+    }))
+}
+
+async fn workflows_create_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::CreateWorkflow)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::BAD_REQUEST, "Missing 'name' field".to_string()))?;
+    let description = body
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let steps: Vec<crate::agent::workflow::types::WorkflowStep> = body
+        .get("steps")
+        .ok_or((StatusCode::BAD_REQUEST, "Missing 'steps' field".to_string()))
+        .and_then(|v| {
+            serde_json::from_value(v.clone())
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid steps: {e}")))
+        })?;
+    let input_schema = body
+        .get("input_schema")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let now = chrono::Utc::now();
+    let workflow = crate::agent::workflow::types::Workflow {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        description: description.to_string(),
+        user_id: state.user_id.clone(),
+        steps,
+        input_schema,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Validate before persisting.
+    crate::agent::workflow::compiler::validate_workflow(&workflow).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Workflow validation failed: {e}"),
+        )
+    })?;
+
+    store
+        .create_workflow(&workflow)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": workflow.id,
+        "name": workflow.name,
+        "status": "created",
+    })))
+}
+
+async fn workflows_detail_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewWorkflows)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let workflow = store
+        .get_workflow_by_name(&name, &state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Workflow not found".to_string()))?;
+
+    Ok(Json(serde_json::to_value(&workflow).unwrap_or_default()))
+}
+
+async fn workflows_update_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ModifyWorkflow)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let mut workflow = store
+        .get_workflow_by_name(&name, &state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Workflow not found".to_string()))?;
+
+    if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
+        workflow.description = desc.to_string();
+    }
+    if let Some(steps_val) = body.get("steps") {
+        workflow.steps = serde_json::from_value(steps_val.clone())
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid steps: {e}")))?;
+    }
+    if let Some(schema) = body.get("input_schema") {
+        workflow.input_schema = schema.clone();
+    }
+    workflow.updated_at = chrono::Utc::now();
+
+    crate::agent::workflow::compiler::validate_workflow(&workflow).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Workflow validation failed: {e}"),
+        )
+    })?;
+
+    store
+        .update_workflow(&workflow)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": workflow.id,
+        "name": workflow.name,
+        "status": "updated",
+    })))
+}
+
+async fn workflows_delete_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ModifyWorkflow)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let workflow = store
+        .get_workflow_by_name(&name, &state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Workflow not found".to_string()))?;
+
+    store
+        .delete_workflow(workflow.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "name": workflow.name,
+        "status": "deleted",
+    })))
+}
+
+async fn workflows_runs_handler(
+    Extension(role): Extension<Role>,
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewWorkflows)?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let workflow = store
+        .get_workflow_by_name(&name, &state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Workflow not found".to_string()))?;
+
+    let runs = store
+        .list_workflow_runs(workflow.id, 50)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items: Vec<crate::channels::web::types::WorkflowRunInfo> = runs
+        .iter()
+        .map(|r| crate::channels::web::types::WorkflowRunInfo {
+            id: r.id,
+            status: format!("{:?}", r.status),
+            started_at: r.started_at.to_rfc3339(),
+            completed_at: r.completed_at.map(|dt| dt.to_rfc3339()),
+            error: r.error.clone(),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "runs": items })))
 }
 
 /// Public webhook endpoint — no auth required.

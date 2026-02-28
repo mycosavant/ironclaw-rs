@@ -18,6 +18,7 @@ use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
 };
 use crate::tools::mcp::session::McpSessionManager;
+use crate::tools::mcp::stdio::StdioTransport;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// MCP client for communicating with MCP servers.
@@ -52,6 +53,9 @@ pub struct McpClient {
 
     /// Server configuration (for token secret name lookup).
     server_config: Option<McpServerConfig>,
+
+    /// Stdio transport (when using stdio instead of HTTP).
+    stdio: Option<Arc<StdioTransport>>,
 }
 
 impl McpClient {
@@ -77,6 +81,7 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
+            stdio: None,
         }
     }
 
@@ -99,6 +104,7 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
+            stdio: None,
         }
     }
 
@@ -126,7 +132,41 @@ impl McpClient {
             secrets: Some(secrets),
             user_id: user_id.into(),
             server_config: Some(config),
+            stdio: None,
         }
+    }
+
+    /// Create a new MCP client using stdio transport.
+    ///
+    /// Spawns the given command as a child process and communicates via
+    /// newline-delimited JSON-RPC over stdin/stdout. Use this for local
+    /// MCP servers that speak the stdio transport.
+    pub async fn new_stdio(
+        server_name: impl Into<String>,
+        command: &str,
+        args: &[&str],
+        env: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<Self, ToolError> {
+        let name = server_name.into();
+        let transport = StdioTransport::start(&name, command, args, env).await?;
+
+        Ok(Self {
+            server_url: format!("stdio://{}", command),
+            server_name: name,
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize MCP HTTP client (TLS unavailable? check HTTPS_PROXY): {e}")
+                }),
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "default".to_string(),
+            server_config: None,
+            stdio: Some(Arc::new(transport)),
+        })
     }
 
     /// Get the server name.
@@ -173,7 +213,13 @@ impl McpClient {
 
     /// Send a request to the MCP server with auth and session headers.
     /// Automatically attempts token refresh on 401 errors.
+    /// Routes through stdio transport when present.
     async fn send_request(&self, request: McpRequest) -> Result<McpResponse, ToolError> {
+        // Route through stdio transport if present
+        if let Some(ref stdio) = self.stdio {
+            return stdio.send(request).await;
+        }
+
         // Try up to 2 times: first attempt, then retry after token refresh
         for attempt in 0..2 {
             // Request both JSON and SSE as per MCP spec
@@ -480,6 +526,7 @@ impl Clone for McpClient {
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
+            stdio: self.stdio.clone(),
         }
     }
 }

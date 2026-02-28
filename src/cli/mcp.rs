@@ -360,7 +360,16 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let secrets = get_secrets_store().await?;
     let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
 
-    let client = if has_tokens {
+    let client = if server.is_stdio() {
+        let cmd = server.command.as_deref().unwrap_or_default();
+        let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
+        let env = if server.env.is_empty() {
+            None
+        } else {
+            Some(&server.env)
+        };
+        McpClient::new_stdio(&server.name, cmd, &args, env).await?
+    } else if has_tokens {
         // We have stored tokens, use authenticated client
         McpClient::new_authenticated(server.clone(), session_manager, secrets, user_id)
     } else if server.requires_auth() {

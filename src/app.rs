@@ -538,15 +538,40 @@ impl AppBuilder {
 
                                 join_set.spawn(async move {
                                     let server_name = server.name.clone();
-                                    let has_tokens =
-                                        is_authenticated(&server, &secrets, "default").await;
 
-                                    let client = if has_tokens || server.requires_auth() {
-                                        McpClient::new_authenticated(
-                                            server, mcp_sm, secrets, "default",
-                                        )
+                                    let client = if server.is_stdio() {
+                                        // Stdio transport: spawn the command as a child process
+                                        let cmd = server.command.as_deref().unwrap_or_default();
+                                        let args: Vec<&str> =
+                                            server.args.iter().map(|s| s.as_str()).collect();
+                                        let env = if server.env.is_empty() {
+                                            None
+                                        } else {
+                                            Some(&server.env)
+                                        };
+                                        match McpClient::new_stdio(&server_name, cmd, &args, env)
+                                            .await
+                                        {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to start stdio MCP server '{}': {}",
+                                                    server_name,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
                                     } else {
-                                        McpClient::new_with_name(&server_name, &server.url)
+                                        let has_tokens =
+                                            is_authenticated(&server, &secrets, "default").await;
+                                        if has_tokens || server.requires_auth() {
+                                            McpClient::new_authenticated(
+                                                server, mcp_sm, secrets, "default",
+                                            )
+                                        } else {
+                                            McpClient::new_with_name(&server_name, &server.url)
+                                        }
                                     };
 
                                     match client.list_tools().await {

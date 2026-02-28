@@ -11,14 +11,35 @@ use tokio::fs;
 
 use crate::tools::tool::ToolError;
 
-/// Configuration for connecting to a remote MCP server.
+/// Configuration for connecting to an MCP server.
+///
+/// Supports two transport modes:
+/// - **HTTP** (default): Set `url` to the server's HTTP/HTTPS endpoint.
+/// - **Stdio**: Set `command` (and optionally `args`/`env`) to spawn a local
+///   MCP server process and communicate via stdin/stdout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Unique name for this server (e.g., "notion", "github").
     pub name: String,
 
-    /// Server URL (must be HTTPS for remote servers).
+    /// Server URL for HTTP transport (must be HTTPS for remote servers).
+    /// Ignored when `command` is set (stdio transport).
+    #[serde(default)]
     pub url: String,
+
+    /// Command to spawn for stdio transport (e.g., "npx", "uvx", "node").
+    /// When set, the server communicates via newline-delimited JSON-RPC
+    /// over the child process's stdin/stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Arguments for the stdio command (e.g., ["-y", "@mcp/server-filesystem", "/tmp"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
+    /// Extra environment variables for the stdio command.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 
     /// OAuth configuration (if server requires authentication).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,11 +59,32 @@ fn default_true() -> bool {
 }
 
 impl McpServerConfig {
-    /// Create a new MCP server configuration.
+    /// Create a new HTTP-transport MCP server configuration.
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             url: url.into(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            oauth: None,
+            enabled: true,
+            description: None,
+        }
+    }
+
+    /// Create a new stdio-transport MCP server configuration.
+    pub fn new_stdio(
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            url: String::new(),
+            command: Some(command.into()),
+            args,
+            env: HashMap::new(),
             oauth: None,
             enabled: true,
             description: None,
@@ -61,12 +103,33 @@ impl McpServerConfig {
         self
     }
 
+    /// Set extra environment variables for stdio transport.
+    pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Whether this server uses stdio transport.
+    pub fn is_stdio(&self) -> bool {
+        self.command.is_some()
+    }
+
     /// Validate the server configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.name.is_empty() {
             return Err(ConfigError::InvalidConfig {
                 reason: "Server name cannot be empty".to_string(),
             });
+        }
+
+        // Stdio servers need a command; HTTP servers need a URL
+        if self.is_stdio() {
+            if self.command.as_ref().is_some_and(|c| c.is_empty()) {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "Stdio server command cannot be empty".to_string(),
+                });
+            }
+            return Ok(());
         }
 
         if self.url.is_empty() {
@@ -91,7 +154,12 @@ impl McpServerConfig {
     ///
     /// Returns true if OAuth is pre-configured OR if this is a remote HTTPS server
     /// (which likely supports Dynamic Client Registration even without pre-configured OAuth).
+    /// Stdio servers never require authentication.
     pub fn requires_auth(&self) -> bool {
+        // Stdio servers are local processes — no auth needed
+        if self.is_stdio() {
+            return false;
+        }
         if self.oauth.is_some() {
             return true;
         }

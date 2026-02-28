@@ -1592,17 +1592,29 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
-        let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
-
-        let client = if has_tokens || server.requires_auth() {
-            McpClient::new_authenticated(
-                server.clone(),
-                Arc::clone(&self.mcp_session_manager),
-                Arc::clone(&self.secrets),
-                &self.user_id,
-            )
+        let client = if server.is_stdio() {
+            let cmd = server.command.as_deref().unwrap_or_default();
+            let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
+            let env = if server.env.is_empty() {
+                None
+            } else {
+                Some(&server.env)
+            };
+            McpClient::new_stdio(&server.name, cmd, &args, env)
+                .await
+                .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
         } else {
-            McpClient::new_with_name(&server.name, &server.url)
+            let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
+            if has_tokens || server.requires_auth() {
+                McpClient::new_authenticated(
+                    server.clone(),
+                    Arc::clone(&self.mcp_session_manager),
+                    Arc::clone(&self.secrets),
+                    &self.user_id,
+                )
+            } else {
+                McpClient::new_with_name(&server.name, &server.url)
+            }
         };
 
         // Try to list and create tools

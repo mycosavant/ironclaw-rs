@@ -697,6 +697,32 @@ pub struct RoutineRunInfo {
     pub tokens_used: Option<i32>,
 }
 
+// --- Workflows ---
+
+#[derive(Debug, Serialize)]
+pub struct WorkflowInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub step_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkflowListResponse {
+    pub workflows: Vec<WorkflowInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkflowRunInfo {
+    pub id: Uuid,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub error: Option<String>,
+}
+
 // --- Settings ---
 
 #[derive(Debug, Serialize)]

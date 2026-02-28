@@ -31,9 +31,11 @@ mod client;
 pub mod config;
 mod protocol;
 pub mod session;
+pub mod stdio;
 
 pub use auth::{is_authenticated, refresh_access_token};
 pub use client::McpClient;
 pub use config::{McpServerConfig, McpServersFile, OAuthConfig};
 pub use protocol::{InitializeResult, McpRequest, McpResponse, McpTool};
 pub use session::McpSessionManager;
+pub use stdio::StdioTransport;
