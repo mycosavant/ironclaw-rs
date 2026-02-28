@@ -61,6 +61,9 @@ pub enum WasmLoadError {
     #[error("Invalid capabilities JSON: {0}")]
     InvalidCapabilities(String),
 
+    #[error("Signature verification failed for '{name}': {reason}")]
+    SignatureRequired { name: String, reason: String },
+
     #[error("WASM compilation error: {0}")]
     Compilation(#[from] WasmError),
 
@@ -139,10 +142,9 @@ impl WasmToolLoader {
                         &sig_hex,
                         &signing.keys,
                     )
-                    .map_err(|e| {
-                        WasmLoadError::InvalidCapabilities(format!(
-                            "Signature verification failed: {e}"
-                        ))
+                    .map_err(|e| WasmLoadError::SignatureRequired {
+                        name: name.to_string(),
+                        reason: format!("verification failed: {e}"),
                     })?;
                     tracing::debug!(
                         name = name,
@@ -151,12 +153,24 @@ impl WasmToolLoader {
                     );
                 }
                 Ok(None) => {
+                    if signing.require_for_installed {
+                        return Err(WasmLoadError::SignatureRequired {
+                            name: name.to_string(),
+                            reason: "no .sig file found".to_string(),
+                        });
+                    }
                     tracing::debug!(
                         name = name,
                         "No .sig file found for WASM module, skipping verification"
                     );
                 }
                 Err(e) => {
+                    if signing.require_for_installed {
+                        return Err(WasmLoadError::SignatureRequired {
+                            name: name.to_string(),
+                            reason: format!("failed to read .sig file: {e}"),
+                        });
+                    }
                     tracing::warn!(
                         name = name,
                         error = %e,

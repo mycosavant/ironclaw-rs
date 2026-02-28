@@ -79,6 +79,8 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// Ed25519 signing configuration for WASM/skill verification.
+    pub signing: crate::crypto::SigningConfig,
 }
 
 impl Config {
@@ -204,6 +206,36 @@ impl Config {
             skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
+            },
+            signing: {
+                let keys = match std::env::var("IRONCLAW_SIGNING_KEYS") {
+                    Ok(hex_csv) if !hex_csv.is_empty() => {
+                        match crate::crypto::signing::load_trusted_keys(&hex_csv) {
+                            Ok(k) => {
+                                tracing::info!(
+                                    "Loaded {} Ed25519 signing key(s) from IRONCLAW_SIGNING_KEYS",
+                                    k.len()
+                                );
+                                k
+                            }
+                            Err(e) => {
+                                return Err(ConfigError::ParseError(format!(
+                                    "IRONCLAW_SIGNING_KEYS is set but contains an invalid key: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    _ => Vec::new(),
+                };
+                let require = helpers::optional_env("IRONCLAW_SIGNING_REQUIRE_INSTALLED")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(true);
+                crate::crypto::SigningConfig {
+                    keys,
+                    require_for_installed: require,
+                }
             },
         })
     }
