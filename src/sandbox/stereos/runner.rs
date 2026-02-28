@@ -68,15 +68,15 @@ fn validate_ssh_key_path(path: &Path) -> std::result::Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            let mode = metadata.permissions().mode();
-            if mode & 0o077 != 0 {
-                return Err(format!(
-                    "SSH key {} has insecure permissions {:o} (expected 0600 or stricter)",
-                    path.display(),
-                    mode & 0o777
-                ));
-            }
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| format!("cannot read SSH key metadata {}: {}", path.display(), e))?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "SSH key {} has insecure permissions {:o} (expected 0600 or stricter)",
+                path.display(),
+                mode & 0o777
+            ));
         }
     }
 
@@ -298,13 +298,19 @@ impl StereOsRunner {
 
         let mut cmd = self.build_qemu_command(ssh_port, memory_mb, cpus);
 
-        let child = cmd.spawn().map_err(|e| SandboxError::ExecutionFailed {
-            reason: format!(
-                "failed to spawn QEMU ({}): {}",
-                self.qemu_binary().display(),
-                e
-            ),
-        })?;
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.ports.release(ssh_port).await;
+                return Err(SandboxError::ExecutionFailed {
+                    reason: format!(
+                        "failed to spawn QEMU ({}): {}",
+                        self.qemu_binary().display(),
+                        e
+                    ),
+                });
+            }
+        };
 
         // Wait for SSH to become ready
         let ssh = self.ssh_client(ssh_port);
@@ -373,6 +379,12 @@ impl SandboxBackend for StereOsRunner {
             });
         }
 
+        // Validate env keys before spawning to avoid wasting a boot cycle
+        // and leaking a port on validation failure.
+        for k in env.keys() {
+            validate_env_key(k)?;
+        }
+
         let start = std::time::Instant::now();
 
         tracing::info!(
@@ -396,7 +408,6 @@ impl SandboxBackend for StereOsRunner {
 
         // User-provided env vars (after proxy so user can override)
         for (k, v) in &env {
-            validate_env_key(k)?;
             parts.push(format!("export {}={}", k, shell_quote(v)));
         }
 
@@ -466,18 +477,26 @@ impl SandboxBackend for StereOsRunner {
             );
         }
 
-        // Check instance limit under write lock to prevent TOCTOU races
-        let mut instances = self.instances.write().await;
-        if instances.len() >= self.config.max_instances {
-            return Err(SandboxError::CapacityExhausted {
-                reason: format!(
-                    "maximum stereOS instances reached ({})",
-                    self.config.max_instances
-                ),
-            });
+        // Validate env keys before spawning to avoid wasting a boot cycle.
+        for (k, _) in &env {
+            validate_env_key(k)?;
         }
 
-        // Spawn the VM
+        // Check capacity under read lock (cheap), then release before the
+        // expensive VM boot. We re-check under write lock before inserting.
+        {
+            let instances = self.instances.read().await;
+            if instances.len() >= self.config.max_instances {
+                return Err(SandboxError::CapacityExhausted {
+                    reason: format!(
+                        "maximum stereOS instances reached ({})",
+                        self.config.max_instances
+                    ),
+                });
+            }
+        }
+
+        // Spawn the VM (lock released — other operations unblocked during boot)
         let (child, ssh_port) = self
             .spawn_vm(limits.memory_bytes / (1024 * 1024), self.config.cpus)
             .await?;
@@ -488,11 +507,6 @@ impl SandboxBackend for StereOsRunner {
         // entrypoint in the background. Using a single exec() call ensures
         // the exported variables are visible to the entrypoint process.
         let launch_result: Result<()> = async {
-            // Validate env keys before building the command
-            for (k, _) in &env {
-                validate_env_key(k)?;
-            }
-
             // Inject proxy env vars first, then user env vars (so user can
             // override). Persistent instances are always sandboxed — FullAccess
             // is handled by SandboxManager and never reaches the backend.
@@ -538,6 +552,21 @@ impl SandboxBackend for StereOsRunner {
 
         // Generate instance ID and track the instance
         let instance_id = format!("stereos-{job_id}");
+
+        // Re-check capacity under write lock to handle races where another
+        // create_instance completed while we were booting.
+        let mut instances = self.instances.write().await;
+        if instances.len() >= self.config.max_instances {
+            drop(child);
+            self.ports.release(ssh_port).await;
+            return Err(SandboxError::CapacityExhausted {
+                reason: format!(
+                    "maximum stereOS instances reached ({})",
+                    self.config.max_instances
+                ),
+            });
+        }
+
         tracing::info!(
             %instance_id,
             %job_id,
