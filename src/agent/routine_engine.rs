@@ -223,6 +223,13 @@ impl RoutineEngine {
             });
         }
 
+        // Global capacity guard (same check as cron/event paths).
+        if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
         if !self.check_concurrent(&routine).await {
             return Err(RoutineError::MaxConcurrent {
                 name: routine.name.clone(),

@@ -188,6 +188,23 @@ fn validate_step_refs(
                         branch_available.difference(available).cloned().collect();
                     branch_outputs.push(new_keys);
                 }
+                // Reject duplicate output keys across parallel branches:
+                // two branches producing the same key leads to
+                // non-deterministic last-writer-wins behavior at runtime.
+                let mut seen_keys: HashSet<String> = HashSet::new();
+                for keys in &branch_outputs {
+                    for key in keys {
+                        if !seen_keys.insert(key.clone()) {
+                            return Err(WorkflowError::Validation {
+                                reason: format!(
+                                    "parallel branches produce duplicate output key '{key}'; \
+                                     use unique step IDs per branch to avoid \
+                                     non-deterministic results"
+                                ),
+                            });
+                        }
+                    }
+                }
                 // After parallel, all branch outputs become available
                 for keys in branch_outputs {
                     available.extend(keys);
@@ -512,6 +529,33 @@ mod tests {
         let w = make_workflow(inner);
         let err = validate_workflow(&w).unwrap_err();
         assert!(err.to_string().contains("nesting exceeds maximum depth"));
+    }
+
+    #[test]
+    fn test_parallel_duplicate_output_keys_rejected() {
+        // Two parallel branches producing steps with the same ID is caught by
+        // collect_step_ids. But branches can also produce different step IDs
+        // that happen to collide as output keys (same step ID in different
+        // branches). The duplicate-ID check already prevents this, so we test
+        // the scenario where the step IDs are unique but output keys collide
+        // isn't possible with current types (step ID = output key). Instead,
+        // verify the existing duplicate-ID path works for parallel branches.
+        let w = make_workflow(vec![WorkflowStep::Parallel {
+            id: "fan".into(),
+            branches: vec![
+                vec![WorkflowStep::Prompt {
+                    id: "shared".into(),
+                    prompt: "a".into(),
+                    max_tokens: 1024,
+                }],
+                vec![WorkflowStep::Prompt {
+                    id: "shared".into(),
+                    prompt: "b".into(),
+                    max_tokens: 1024,
+                }],
+            ],
+        }]);
+        assert!(validate_workflow(&w).is_err());
     }
 
     #[test]

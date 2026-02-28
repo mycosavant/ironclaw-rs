@@ -54,10 +54,11 @@ pub async fn unregister_inbox(bus: &AgentMessageBus, job_id: Uuid) {
     bus.write().await.remove(&job_id);
 }
 
-/// Send a message to a specific job.
+/// Send a message to a specific job with a 10-second timeout.
 ///
 /// Returns `Ok(())` on successful delivery to the job's inbox channel.
-/// Returns `Err` if the target job is not registered or its inbox is closed.
+/// Returns `Err` if the target job is not registered, its inbox is closed,
+/// or the send does not complete within the timeout.
 pub async fn send_message(
     bus: &AgentMessageBus,
     to_job_id: Uuid,
@@ -70,10 +71,13 @@ pub async fn send_message(
         map.get(&to_job_id).cloned()
     };
     match tx {
-        Some(tx) => tx
-            .send(message)
-            .await
-            .map_err(|_| format!("Job {} inbox closed", to_job_id)),
+        Some(tx) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), tx.send(message)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(format!("Job {} inbox closed", to_job_id)),
+                Err(_) => Err(format!("Job {} inbox send timed out", to_job_id)),
+            }
+        }
         None => Err(format!("Job {} not found in message bus", to_job_id)),
     }
 }
@@ -160,5 +164,24 @@ mod tests {
 
         let reply_val = reply_rx.await.expect("should get reply");
         assert_eq!(reply_val["answer"], "pong");
+    }
+
+    #[tokio::test]
+    async fn test_send_to_closed_inbox_returns_error() {
+        let bus = new_message_bus();
+        let (tx, rx) = mpsc::channel(1);
+        let job_id = Uuid::new_v4();
+
+        register_inbox(&bus, job_id, tx).await;
+        drop(rx); // Close the receiving end.
+
+        let msg = AgentMessage {
+            from_job_id: Uuid::new_v4(),
+            payload: serde_json::json!(null),
+            reply_tx: None,
+        };
+        let result = send_message(&bus, job_id, msg).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("inbox closed"));
     }
 }

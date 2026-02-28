@@ -528,20 +528,6 @@ impl Agent {
                         .tools
                         .register_routine_tools(Arc::clone(store), Arc::clone(&engine));
 
-                    // Register workflow tools
-                    let workflow_executor = Arc::new(
-                        crate::agent::workflow::WorkflowExecutor::new(
-                            Arc::clone(store),
-                            self.deps.llm.clone(),
-                            self.scheduler.clone(),
-                            self.deps.tools.clone(),
-                        )
-                        .with_safety(self.deps.safety.clone()),
-                    );
-                    self.deps
-                        .tools
-                        .register_workflow_tools(Arc::clone(store), workflow_executor);
-
                     // Load initial event cache
                     engine.refresh_event_cache().await;
 
@@ -596,6 +582,22 @@ impl Agent {
         } else {
             None
         };
+
+        // Register workflow tools (independent of routines — workflows work standalone).
+        if let Some(store) = self.store() {
+            let workflow_executor = Arc::new(
+                crate::agent::workflow::WorkflowExecutor::new(
+                    Arc::clone(store),
+                    self.deps.llm.clone(),
+                    self.scheduler.clone(),
+                    self.deps.tools.clone(),
+                )
+                .with_safety(self.deps.safety.clone()),
+            );
+            self.deps
+                .tools
+                .register_workflow_tools(Arc::clone(store), workflow_executor);
+        }
 
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
