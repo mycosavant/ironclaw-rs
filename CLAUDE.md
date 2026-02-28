@@ -27,6 +27,13 @@
 - **Multi-provider LLM**: NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil private inference
 - **Setup wizard**: 7-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
+- **RBAC**: Role-based access control (Owner/Admin/User/Viewer) on web gateway endpoints
+- **Workflow engine**: Multi-step orchestration with sequential, parallel, conditional, and loop steps
+- **Inter-agent communication**: Message bus for agent-to-agent messaging with `agent_send`/`agent_spawn` tools
+- **Browser automation**: Playwright-based browser tools (navigate, click, type, screenshot, read_page, close) with SSRF defense
+- **Cycle detection**: SHA-256 sliding window guard against repeating tool-call patterns
+- **Audit trail**: Merkle hash-chain on job action records for tamper-evident logging
+- **Manifest signing**: Ed25519 verification of skill and WASM tool manifests
 
 ## Build & Test
 
@@ -72,7 +79,14 @@ src/
 │   ├── dispatcher.rs   # Skill-aware job dispatching
 │   ├── task.rs         # Sub-task execution framework
 │   ├── routine.rs      # Routine types (Trigger, Action, Guardrails)
-│   └── routine_engine.rs # Routine execution (cron ticker, event matcher)
+│   ├── routine_engine.rs # Routine execution (cron ticker, event matcher)
+│   ├── cycle_guard.rs  # SHA-256 tool-call cycle detection
+│   ├── messaging.rs    # Inter-agent message bus
+│   └── workflow/       # Multi-step workflow engine
+│       ├── mod.rs
+│       ├── types.rs    # Workflow, WorkflowStep, ConditionExpr
+│       ├── executor.rs # Step execution with parallel/conditional/loop
+│       └── compiler.rs # Validation (unique IDs, forward refs, loop bounds)
 │
 ├── channels/           # Multi-channel input
 │   ├── channel.rs      # Channel trait, IncomingMessage, OutgoingResponse
@@ -94,6 +108,7 @@ src/
 │   │   ├── types.rs    # Request/response types, SseEvent enum
 │   │   ├── auth.rs     # Bearer token auth middleware
 │   │   ├── log_layer.rs # Tracing layer for log streaming
+│   │   ├── rbac.rs     # Role-based access control
 │   │   └── static/     # HTML, CSS, JS (single-page app)
 │   └── wasm/           # WASM channel runtime
 │       ├── mod.rs
@@ -145,6 +160,8 @@ src/
 │   │   ├── routine.rs  # routine_create/list/update/delete/history
 │   │   ├── extension_tools.rs # Extension install/auth/activate/remove
 │   │   ├── skill_tools.rs # skill_list/search/install/remove tools
+│   │   ├── browser.rs  # Playwright browser automation tools
+│   │   ├── workflow.rs # Workflow management tools (create/run/list/status/delete/update)
 │   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
 │   ├── builder/        # Dynamic tool building
 │   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
@@ -226,9 +243,13 @@ src/
 │   ├── parser.rs       # SKILL.md frontmatter + markdown parser
 │   └── catalog.rs      # ClawHub registry client
 │
+├── crypto/             # Cryptographic utilities
+│   └── signing.rs      # Ed25519 manifest verification
+│
 └── history/            # Persistence
     ├── store.rs        # PostgreSQL repositories
-    └── analytics.rs    # Aggregation queries (JobStats, ToolStats)
+    ├── analytics.rs    # Aggregation queries (JobStats, ToolStats)
+    └── chain.rs        # Merkle hash-chain verification
 ```
 
 ## Key Patterns
@@ -430,6 +451,17 @@ SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
 # Tinfoil private inference
 TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
 TINFOIL_MODEL=kimi-k2-5               # Default model
+
+# Agent behavior
+# AGENT_CYCLE_WINDOW_SIZE=8          # Sliding window for tool-call cycle detection
+# AGENT_BUS_CAPACITY=256             # Inter-agent message bus channel capacity
+# AGENT_MAX_CHILD_AGENTS=5           # Max child agents per parent via agent_spawn
+
+# RBAC (role-based access control for web gateway)
+# GATEWAY_ROLES={"tok_admin":"admin","tok_viewer":"viewer"}  # JSON: token_prefix -> role
+
+# Browser automation
+# BROWSER_MAX_SESSIONS=5             # Max concurrent Playwright browser sessions
 ```
 
 ### LLM Providers

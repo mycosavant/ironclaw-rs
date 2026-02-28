@@ -592,3 +592,18 @@ IronClaw intentionally differs from OpenClaw in these ways:
 9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
 
 These are intentional architectural choices, not gaps to be filled.
+
+## IronClaw-Only Features (Waves 1–3)
+
+Features built as part of the competitive roadmap that have no OpenClaw equivalent:
+
+| Feature | Module | Description |
+|---|---|---|
+| SHA-256 Cycle Guard | `agent/cycle_guard.rs` | Sliding window detection of repeating tool-call patterns |
+| Merkle Hash-Chain Audit Trail | `history/chain.rs` | Tamper-evident logging of job action records |
+| Ed25519 Manifest Signing | `crypto/signing.rs` | Cryptographic verification of skill and WASM tool manifests |
+| Smart Routing | `llm/smart_routing.rs` | Cost-saving routing of simple tasks to cheaper models with cascade |
+| RBAC | `channels/web/rbac.rs` | Role-based access control (Owner/Admin/User/Viewer) on gateway endpoints |
+| Inter-Agent Communication | `agent/messaging.rs` | Message bus for agent-to-agent messaging (`agent_send`/`agent_spawn`) |
+| Browser Automation | `tools/builtin/browser.rs` | Playwright-based browser tools with SSRF defense and leak detection |
+| Workflow Engine | `agent/workflow/` | Multi-step orchestration with sequential, parallel, conditional, and loop steps |
