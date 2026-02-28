@@ -23,15 +23,26 @@ use crate::sandbox::stereos::ports::PortAllocator;
 use crate::sandbox::stereos::ssh::SshClient;
 
 /// Shell-quote a string using single quotes (POSIX-safe).
+///
+/// Strips NUL bytes before quoting since they cannot appear in POSIX shell strings.
 fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    let cleaned = s.replace('\0', "");
+    format!("'{}'", cleaned.replace('\'', "'\\''"))
 }
 
 /// Validate that an environment variable key is a safe POSIX identifier.
+///
+/// Rejects empty keys, keys containing NUL bytes, and keys that don't match
+/// the pattern `[A-Za-z_][A-Za-z0-9_]*`.
 fn validate_env_key(k: &str) -> Result<()> {
     if k.is_empty() {
         return Err(SandboxError::ExecutionFailed {
             reason: "empty environment variable key".to_string(),
+        });
+    }
+    if k.contains('\0') {
+        return Err(SandboxError::ExecutionFailed {
+            reason: format!("environment variable key contains NUL byte: {:?}", k),
         });
     }
     let first = k.as_bytes()[0];
@@ -45,6 +56,33 @@ fn validate_env_key(k: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate that an SSH key path exists and has secure permissions.
+///
+/// On Unix, checks that the key file is not readable by group or others
+/// (mode `& 0o077 == 0`), matching OpenSSH's permission requirements.
+fn validate_ssh_key_path(path: &Path) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Err(format!("SSH key not found: {}", path.display()));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(format!(
+                    "SSH key {} has insecure permissions {:o} (expected 0600 or stricter)",
+                    path.display(),
+                    mode & 0o777
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Configuration for the stereOS runner.
 #[derive(Debug, Clone)]
 pub struct StereOsConfig {
@@ -53,6 +91,10 @@ pub struct StereOsConfig {
     /// Path to `qemu-system-{arch}` binary (auto-detected if None).
     pub qemu_path: Option<PathBuf>,
     /// Path to the SSH private key for connecting to VMs.
+    ///
+    /// Production stereOS uses vsock-based key injection so the private key
+    /// never touches the host filesystem. This path-based approach is for
+    /// development images or pre-configured keys during integration testing.
     pub ssh_key_path: PathBuf,
     /// VM memory in megabytes.
     pub memory_mb: u64,
@@ -66,6 +108,15 @@ pub struct StereOsConfig {
     pub boot_timeout: Duration,
     /// SSH user inside the VM (default: "agent").
     pub ssh_user: String,
+    /// Host-side network proxy port (0 = disabled).
+    ///
+    /// When non-zero and the sandbox policy is sandboxed, `http_proxy` /
+    /// `https_proxy` env vars are injected into VM commands pointing to
+    /// `10.0.2.2:<proxy_port>` (the QEMU user-mode gateway).
+    pub proxy_port: u16,
+    /// Path to UEFI firmware (e.g. OVMF). When set, passes `-bios <path>`
+    /// to QEMU for UEFI boot instead of legacy BIOS.
+    pub uefi_firmware_path: Option<PathBuf>,
 }
 
 impl Default for StereOsConfig {
@@ -81,15 +132,18 @@ impl Default for StereOsConfig {
             max_instances: 5,
             boot_timeout: Duration::from_secs(10),
             ssh_user: "agent".to_string(),
+            proxy_port: 0,
+            uefi_firmware_path: None,
         }
     }
 }
 
 /// State of a running QEMU VM instance.
+#[allow(dead_code)]
 enum VmState {
     /// VM is running and SSH is ready.
     Running,
-    /// VM has been stopped.
+    /// VM has been stopped (tracked for diagnostic purposes).
     Stopped,
 }
 
@@ -121,6 +175,12 @@ pub struct StereOsRunner {
 impl StereOsRunner {
     /// Create a new stereOS runner.
     pub fn new(config: StereOsConfig) -> Self {
+        // Warn early if the SSH key is missing or has bad permissions.
+        // Don't panic — the key may be provisioned later (e.g. by a setup script).
+        if let Err(e) = validate_ssh_key_path(&config.ssh_key_path) {
+            tracing::warn!("{}", e);
+        }
+
         let ports = PortAllocator::new(config.ssh_port_base, config.max_instances as u16);
         Self {
             config,
@@ -154,9 +214,17 @@ impl StereOsRunner {
 
         cmd.args(["-m", &format!("{memory_mb}M"), "-smp", &cpus.to_string()]);
 
-        // Enable KVM on Linux if available
-        if cfg!(target_os = "linux") {
+        // Enable KVM on Linux if /dev/kvm exists at runtime
+        #[cfg(target_os = "linux")]
+        if std::path::Path::new("/dev/kvm").exists() {
             cmd.arg("-enable-kvm");
+        } else {
+            tracing::warn!("KVM not available; falling back to software emulation");
+        }
+
+        // UEFI firmware (e.g. OVMF) if configured
+        if let Some(ref fw) = self.config.uefi_firmware_path {
+            cmd.args(["-bios", &fw.display().to_string()]);
         }
 
         // Drive: use snapshot=on for immutable base image
@@ -175,6 +243,12 @@ impl StereOsRunner {
             "-device",
             "virtio-net-pci,netdev=net0",
         ]);
+
+        // TODO: Add vsock device (`-device vhost-vsock-pci,guest-cid=N`) for
+        // host-guest communication without SSH (key injection, log streaming).
+
+        // TODO: Add virtio-console device for structured output channel
+        // (`-device virtio-serial -chardev socket,... -device virtconsole,...`).
 
         // No graphics, serial on stdio
         cmd.args(["-nographic", "-serial", "mon:stdio"]);
@@ -198,6 +272,24 @@ impl StereOsRunner {
             &self.config.ssh_user,
             self.config.ssh_key_path.clone(),
         )
+    }
+
+    /// Return `export` statements for HTTP proxy env vars.
+    ///
+    /// When `proxy_port > 0` and the policy is sandboxed, returns four export
+    /// statements pointing to the host-side proxy via the QEMU user-mode
+    /// gateway (`10.0.2.2`). Returns an empty vec otherwise.
+    fn proxy_env_exports(&self, policy: SandboxPolicy) -> Vec<String> {
+        if self.config.proxy_port == 0 || !policy.is_sandboxed() {
+            return Vec::new();
+        }
+        let proxy_url = format!("http://10.0.2.2:{}", self.config.proxy_port);
+        vec![
+            format!("export http_proxy={}", shell_quote(&proxy_url)),
+            format!("export https_proxy={}", shell_quote(&proxy_url)),
+            format!("export HTTP_PROXY={}", shell_quote(&proxy_url)),
+            format!("export HTTPS_PROXY={}", shell_quote(&proxy_url)),
+        ]
     }
 
     /// Spawn a QEMU VM, wait for SSH, return the SSH port.
@@ -266,36 +358,56 @@ impl SandboxBackend for StereOsRunner {
     async fn execute(
         &self,
         command: &str,
-        _working_dir: &Path,
-        _policy: SandboxPolicy,
+        working_dir: &Path,
+        policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
     ) -> Result<ContainerOutput> {
+        // M2: Check instance capacity before spawning
+        if self.ports.allocated_count().await >= self.config.max_instances {
+            return Err(SandboxError::CapacityExhausted {
+                reason: format!(
+                    "maximum stereOS instances reached ({})",
+                    self.config.max_instances
+                ),
+            });
+        }
+
         let start = std::time::Instant::now();
+
+        tracing::info!(
+            command,
+            "stereOS: spawning ephemeral VM for command execution"
+        );
 
         // Spawn a fresh VM
         let (mut child, ssh_port) = self
-            .spawn_vm(
-                limits.memory_bytes / (1024 * 1024),
-                limits.cpu_shares.min(8),
-            )
+            .spawn_vm(limits.memory_bytes / (1024 * 1024), self.config.cpus)
             .await?;
 
         let ssh = self.ssh_client(ssh_port);
 
-        // Build a single command that sets env vars and runs the user command
-        // in the same shell session (env vars in separate SSH calls are lost).
-        let full_cmd = if env.is_empty() {
-            command.to_string()
-        } else {
-            let mut parts = Vec::new();
-            for (k, v) in &env {
-                validate_env_key(k)?;
-                parts.push(format!("export {}={}", k, shell_quote(v)));
-            }
-            parts.push(command.to_string());
-            parts.join(" && ")
-        };
+        // Build a single command that sets env vars, changes directory, and
+        // runs the user command in the same shell session.
+        let mut parts = Vec::new();
+
+        // Inject proxy env vars for sandboxed policies
+        parts.extend(self.proxy_env_exports(policy));
+
+        // User-provided env vars (after proxy so user can override)
+        for (k, v) in &env {
+            validate_env_key(k)?;
+            parts.push(format!("export {}={}", k, shell_quote(v)));
+        }
+
+        // Change to working directory if specified and non-root
+        let wd = working_dir.to_string_lossy();
+        if !wd.is_empty() && wd != "/" {
+            parts.push(format!("cd {}", shell_quote(&wd)));
+        }
+
+        parts.push(command.to_string());
+        let full_cmd = parts.join(" && ");
 
         // Execute the command
         let result = ssh.exec(&full_cmd, limits.timeout).await;
@@ -303,6 +415,8 @@ impl SandboxBackend for StereOsRunner {
         // Clean up: kill the VM and release the port
         let _ = child.kill().await;
         self.ports.release(ssh_port).await;
+
+        tracing::info!(ssh_port, "stereOS: ephemeral VM cleaned up");
 
         let duration = start.elapsed();
 
@@ -314,11 +428,13 @@ impl SandboxBackend for StereOsRunner {
 
                 let half_max = limits.max_output_bytes / 2;
                 if stdout.len() > half_max {
-                    stdout.truncate(half_max);
+                    let end = crate::util::floor_char_boundary(&stdout, half_max);
+                    stdout.truncate(end);
                     truncated = true;
                 }
                 if stderr.len() > half_max {
-                    stderr.truncate(half_max);
+                    let end = crate::util::floor_char_boundary(&stderr, half_max);
+                    stderr.truncate(end);
                     truncated = true;
                 }
 
@@ -363,10 +479,7 @@ impl SandboxBackend for StereOsRunner {
 
         // Spawn the VM
         let (child, ssh_port) = self
-            .spawn_vm(
-                limits.memory_bytes / (1024 * 1024),
-                limits.cpu_shares.min(8),
-            )
+            .spawn_vm(limits.memory_bytes / (1024 * 1024), self.config.cpus)
             .await?;
 
         let ssh = self.ssh_client(ssh_port);
@@ -380,11 +493,15 @@ impl SandboxBackend for StereOsRunner {
                 validate_env_key(k)?;
             }
 
-            let env_prefix: String = env
-                .iter()
-                .map(|(k, v)| format!("export {}={}", k, shell_quote(v)))
-                .collect::<Vec<_>>()
-                .join(" && ");
+            // Inject proxy env vars first, then user env vars (so user can
+            // override). Persistent instances are always sandboxed — FullAccess
+            // is handled by SandboxManager and never reaches the backend.
+            let mut all_exports: Vec<String> =
+                self.proxy_env_exports(SandboxPolicy::WorkspaceWrite);
+            for (k, v) in &env {
+                all_exports.push(format!("export {}={}", k, shell_quote(v)));
+            }
+            let env_prefix = all_exports.join(" && ");
 
             let cmd_str = entrypoint
                 .iter()
@@ -421,6 +538,12 @@ impl SandboxBackend for StereOsRunner {
 
         // Generate instance ID and track the instance
         let instance_id = format!("stereos-{job_id}");
+        tracing::info!(
+            %instance_id,
+            %job_id,
+            ssh_port,
+            "stereOS: persistent VM instance created"
+        );
 
         instances.insert(
             instance_id.clone(),
@@ -451,17 +574,12 @@ impl SandboxBackend for StereOsRunner {
         let mut instances = self.instances.write().await;
 
         if let Some(mut instance) = instances.remove(instance_id) {
-            // Try graceful shutdown via SSH first (5 second timeout)
-            let ssh = self.ssh_client(instance.ssh_port);
-            let _ = ssh.exec("sudo poweroff", Duration::from_secs(5)).await;
-
-            // Force-kill the QEMU process
+            // Force-kill the QEMU process (the agent user has no sudo,
+            // so `sudo poweroff` would always fail; just kill directly).
             let _ = instance.process.kill().await;
 
             // Release the SSH port
             self.ports.release(instance.ssh_port).await;
-
-            instance._state = VmState::Stopped;
 
             tracing::info!(instance_id, "stereOS VM stopped");
         }
@@ -556,5 +674,109 @@ mod tests {
         assert!(validate_env_key("FOO BAR").is_err());
         assert!(validate_env_key("X=$(rm -rf /)").is_err());
         assert!(validate_env_key("A;B").is_err());
+    }
+
+    #[test]
+    fn test_shell_quote_nul_bytes() {
+        // NUL bytes should be stripped before quoting
+        assert_eq!(shell_quote("hel\0lo"), "'hello'");
+        assert_eq!(shell_quote("\0"), "''");
+        assert_eq!(shell_quote("a\0b\0c"), "'abc'");
+    }
+
+    #[test]
+    fn test_validate_env_key_nul_byte() {
+        assert!(validate_env_key("FOO\0BAR").is_err());
+        assert!(validate_env_key("\0").is_err());
+    }
+
+    #[test]
+    fn test_validate_ssh_key_path_missing() {
+        let result = validate_ssh_key_path(Path::new("/nonexistent/key_file"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_ssh_key_path_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("ironclaw_test_ssh_perms");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Test with insecure permissions (0644)
+        let insecure = dir.join("insecure_key");
+        std::fs::write(&insecure, "fake-key").unwrap();
+        std::fs::set_permissions(&insecure, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let result = validate_ssh_key_path(&insecure);
+        assert!(result.is_err(), "should reject 0644 permissions");
+
+        // Test with secure permissions (0600)
+        let secure = dir.join("secure_key");
+        std::fs::write(&secure, "fake-key").unwrap();
+        std::fs::set_permissions(&secure, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = validate_ssh_key_path(&secure);
+        assert!(result.is_ok(), "should accept 0600 permissions");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_proxy_env_exports_sandboxed() {
+        let config = StereOsConfig {
+            proxy_port: 8080,
+            ..Default::default()
+        };
+        let runner = StereOsRunner::new(config);
+        let exports = runner.proxy_env_exports(SandboxPolicy::WorkspaceWrite);
+        assert_eq!(exports.len(), 4);
+        assert!(exports[0].contains("http_proxy"));
+        assert!(exports[1].contains("https_proxy"));
+        assert!(exports[2].contains("HTTP_PROXY"));
+        assert!(exports[3].contains("HTTPS_PROXY"));
+        // All should point to the QEMU gateway
+        for export in &exports {
+            assert!(
+                export.contains("10.0.2.2:8080"),
+                "expected proxy URL in: {export}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_proxy_env_exports_full_access() {
+        let config = StereOsConfig {
+            proxy_port: 8080,
+            ..Default::default()
+        };
+        let runner = StereOsRunner::new(config);
+        let exports = runner.proxy_env_exports(SandboxPolicy::FullAccess);
+        assert!(
+            exports.is_empty(),
+            "FullAccess should not inject proxy vars"
+        );
+    }
+
+    #[test]
+    fn test_proxy_env_exports_no_proxy() {
+        let config = StereOsConfig {
+            proxy_port: 0,
+            ..Default::default()
+        };
+        let runner = StereOsRunner::new(config);
+        let exports = runner.proxy_env_exports(SandboxPolicy::WorkspaceWrite);
+        assert!(
+            exports.is_empty(),
+            "proxy_port=0 should not inject proxy vars"
+        );
+    }
+
+    #[test]
+    fn test_default_config_new_fields() {
+        let config = StereOsConfig::default();
+        assert_eq!(config.proxy_port, 0);
+        assert!(config.uefi_firmware_path.is_none());
     }
 }

@@ -6,8 +6,8 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// Backend runtime (Docker, QEMU) is not available.
-    #[error("Docker not available: {reason}")]
-    DockerNotAvailable { reason: String },
+    #[error("Sandbox backend not available: {reason}")]
+    BackendNotAvailable { reason: String },
 
     /// Failed to create container or VM instance.
     #[error("Container creation failed: {reason}")]

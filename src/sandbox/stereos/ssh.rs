@@ -22,6 +22,7 @@ pub struct SshOutput {
 }
 
 /// SSH client for a specific VM instance.
+#[derive(Debug)]
 pub struct SshClient {
     /// Host to connect to (typically "127.0.0.1" for forwarded ports).
     host: String,
@@ -69,6 +70,10 @@ impl SshClient {
     }
 
     /// Copy a file to the remote VM.
+    ///
+    /// Reserved for future use (e.g. injecting configuration files or
+    /// build artifacts into VMs before execution).
+    #[allow(dead_code)]
     pub async fn scp_to(
         &self,
         local_path: &Path,
@@ -133,6 +138,9 @@ impl SshClient {
     }
 
     /// Common SSH arguments for ephemeral VM connections.
+    ///
+    /// Uses a 5-second `ConnectTimeout` which is suitable for local QEMU VMs
+    /// where SSH is available within milliseconds of the port being forwarded.
     fn base_args(&self) -> Vec<String> {
         vec![
             "-o".to_string(),
@@ -193,5 +201,14 @@ mod tests {
         // SCP uses -P (uppercase) for port
         assert!(args.contains(&"-P".to_string()));
         assert!(args.contains(&"12345".to_string()));
+    }
+
+    #[test]
+    fn test_ssh_client_debug() {
+        let client = SshClient::new("127.0.0.1", 22, "agent", PathBuf::from("/tmp/key"));
+        let debug = format!("{:?}", client);
+        assert!(debug.contains("SshClient"));
+        assert!(debug.contains("127.0.0.1"));
+        assert!(debug.contains("agent"));
     }
 }

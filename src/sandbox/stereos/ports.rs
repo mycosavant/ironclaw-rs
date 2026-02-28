@@ -98,14 +98,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocate_returns_port_in_range() {
-        let alloc = PortAllocator::new(19000, 10);
+        let alloc = PortAllocator::new(49000, 10);
         let port = alloc.allocate().await.unwrap();
-        assert!((19000..19010).contains(&port));
+        assert!((49000..49010).contains(&port));
     }
 
     #[tokio::test]
     async fn test_allocate_no_duplicates() {
-        let alloc = PortAllocator::new(19010, 5);
+        let alloc = PortAllocator::new(49010, 5);
         let mut ports = Vec::new();
 
         for _ in 0..5 {
@@ -120,7 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_release_allows_reallocation() {
-        let alloc = PortAllocator::new(19020, 1);
+        let alloc = PortAllocator::new(49020, 1);
         let port = alloc.allocate().await.unwrap();
         assert_eq!(alloc.allocated_count().await, 1);
 
@@ -133,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exhaustion_returns_error() {
-        let alloc = PortAllocator::new(19030, 2);
+        let alloc = PortAllocator::new(49030, 2);
         let _p1 = alloc.allocate().await.unwrap();
         let _p2 = alloc.allocate().await.unwrap();
         let result = alloc.allocate().await;

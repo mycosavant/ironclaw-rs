@@ -47,6 +47,10 @@ pub struct StereOsModeConfig {
     pub max_instances: usize,
     /// Timeout for VM boot in seconds.
     pub boot_timeout_secs: u64,
+    /// Host-side network proxy port (0 = disabled).
+    pub proxy_port: u16,
+    /// Path to UEFI firmware (e.g. OVMF). None = legacy BIOS boot.
+    pub uefi_firmware_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "stereos")]
@@ -62,6 +66,8 @@ impl Default for StereOsModeConfig {
             ssh_port_base: 12200,
             max_instances: 5,
             boot_timeout_secs: 10,
+            proxy_port: 0,
+            uefi_firmware_path: None,
         }
     }
 }
@@ -86,6 +92,9 @@ impl StereOsModeConfig {
                 "STEREOS_BOOT_TIMEOUT",
                 defaults.boot_timeout_secs,
             )?,
+            proxy_port: parse_optional_env("STEREOS_PROXY_PORT", defaults.proxy_port)?,
+            uefi_firmware_path: optional_env("STEREOS_UEFI_FIRMWARE")?
+                .map(std::path::PathBuf::from),
         })
     }
 
@@ -101,6 +110,8 @@ impl StereOsModeConfig {
             max_instances: self.max_instances,
             boot_timeout: std::time::Duration::from_secs(self.boot_timeout_secs),
             ssh_user: "agent".to_string(),
+            proxy_port: self.proxy_port,
+            uefi_firmware_path: self.uefi_firmware_path.clone(),
         }
     }
 }
@@ -325,4 +336,46 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
     creds["claudeAiOauth"]["accessToken"]
         .as_str()
         .map(String::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "stereos")]
+    #[test]
+    fn test_stereos_config_to_runner_includes_new_fields() {
+        let config = StereOsModeConfig {
+            proxy_port: 9090,
+            uefi_firmware_path: Some(std::path::PathBuf::from("/usr/share/OVMF/OVMF_CODE.fd")),
+            ..Default::default()
+        };
+        let runner_config = config.to_runner_config();
+        assert_eq!(runner_config.proxy_port, 9090);
+        assert_eq!(
+            runner_config.uefi_firmware_path.as_deref(),
+            Some(std::path::Path::new("/usr/share/OVMF/OVMF_CODE.fd"))
+        );
+    }
+
+    #[cfg(feature = "stereos")]
+    #[test]
+    fn test_stereos_config_defaults_new_fields() {
+        let config = StereOsModeConfig::default();
+        assert_eq!(config.proxy_port, 0);
+        assert!(config.uefi_firmware_path.is_none());
+    }
+
+    #[test]
+    fn test_parse_oauth_access_token_valid() {
+        let json = r#"{"claudeAiOauth": {"accessToken": "sk-ant-oat01-test"}}"#;
+        let token = parse_oauth_access_token(json);
+        assert_eq!(token.as_deref(), Some("sk-ant-oat01-test"));
+    }
+
+    #[test]
+    fn test_parse_oauth_access_token_missing() {
+        assert!(parse_oauth_access_token("{}").is_none());
+        assert!(parse_oauth_access_token("invalid").is_none());
+    }
 }

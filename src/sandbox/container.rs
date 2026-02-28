@@ -514,7 +514,7 @@ pub async fn connect_docker() -> Result<Docker> {
         }
     }
 
-    Err(SandboxError::DockerNotAvailable {
+    Err(SandboxError::BackendNotAvailable {
         reason: "Could not connect to Docker. Tried: default socket, ~/.docker/run/docker.sock"
             .to_string(),
     })

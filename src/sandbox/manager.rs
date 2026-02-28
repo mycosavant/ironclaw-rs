@@ -134,7 +134,7 @@ impl SandboxManager {
 
         // Check if the backend runtime is available
         if !self.backend.is_available().await {
-            return Err(SandboxError::DockerNotAvailable {
+            return Err(SandboxError::BackendNotAvailable {
                 reason: format!("{} backend is not available", self.backend.kind()),
             });
         }
