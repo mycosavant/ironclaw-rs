@@ -237,6 +237,7 @@ integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 media = ["dep:image", "dep:infer", "dep:pdf-extract", "dep:lopdf"]
 browser = []  # No Rust deps — Playwright runs as a Node.js subprocess
+stereos = []  # No Rust deps — QEMU and SSH run as subprocesses
 
 [[test]]
 name = "html_to_markdown"

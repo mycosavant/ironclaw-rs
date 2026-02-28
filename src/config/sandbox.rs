@@ -6,6 +6,8 @@ use crate::error::ConfigError;
 pub struct SandboxModeConfig {
     /// Whether the Docker sandbox is enabled.
     pub enabled: bool,
+    /// Sandbox backend: "docker" (default) or "stereos".
+    pub backend: String,
     /// Sandbox policy: "readonly", "workspace_write", or "full_access".
     pub policy: String,
     /// Command timeout in seconds.
@@ -20,12 +22,94 @@ pub struct SandboxModeConfig {
     pub auto_pull_image: bool,
     /// Additional domains to allow through the network proxy.
     pub extra_allowed_domains: Vec<String>,
+    /// stereOS-specific configuration (populated when backend="stereos").
+    #[cfg(feature = "stereos")]
+    pub stereos: StereOsModeConfig,
+}
+
+/// stereOS VM-specific configuration.
+#[cfg(feature = "stereos")]
+#[derive(Debug, Clone)]
+pub struct StereOsModeConfig {
+    /// Path to the stereOS VM image (.qcow2 or raw).
+    pub image_path: std::path::PathBuf,
+    /// Path to `qemu-system-{arch}` binary (auto-detected if None).
+    pub qemu_path: Option<std::path::PathBuf>,
+    /// Path to the SSH private key for connecting to VMs.
+    pub ssh_key_path: std::path::PathBuf,
+    /// VM memory in megabytes.
+    pub memory_mb: u64,
+    /// Number of vCPUs.
+    pub cpus: u32,
+    /// First port for SSH port allocation.
+    pub ssh_port_base: u16,
+    /// Maximum concurrent VM instances.
+    pub max_instances: usize,
+    /// Timeout for VM boot in seconds.
+    pub boot_timeout_secs: u64,
+}
+
+#[cfg(feature = "stereos")]
+impl Default for StereOsModeConfig {
+    fn default() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        Self {
+            image_path: home.join(".ironclaw").join("stereos").join("stereos.qcow2"),
+            qemu_path: None,
+            ssh_key_path: home.join(".ironclaw").join("stereos").join("agent_key"),
+            memory_mb: 2048,
+            cpus: 2,
+            ssh_port_base: 12200,
+            max_instances: 5,
+            boot_timeout_secs: 10,
+        }
+    }
+}
+
+#[cfg(feature = "stereos")]
+impl StereOsModeConfig {
+    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            image_path: optional_env("STEREOS_IMAGE_PATH")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or(defaults.image_path),
+            qemu_path: optional_env("STEREOS_QEMU_PATH")?.map(std::path::PathBuf::from),
+            ssh_key_path: optional_env("STEREOS_SSH_KEY")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or(defaults.ssh_key_path),
+            memory_mb: parse_optional_env("STEREOS_MEMORY_MB", defaults.memory_mb)?,
+            cpus: parse_optional_env("STEREOS_CPUS", defaults.cpus)?,
+            ssh_port_base: parse_optional_env("STEREOS_SSH_PORT_BASE", defaults.ssh_port_base)?,
+            max_instances: parse_optional_env("STEREOS_MAX_INSTANCES", defaults.max_instances)?,
+            boot_timeout_secs: parse_optional_env(
+                "STEREOS_BOOT_TIMEOUT",
+                defaults.boot_timeout_secs,
+            )?,
+        })
+    }
+
+    /// Convert to the runtime config used by the stereOS runner.
+    pub fn to_runner_config(&self) -> crate::sandbox::stereos::runner::StereOsConfig {
+        crate::sandbox::stereos::runner::StereOsConfig {
+            image_path: self.image_path.clone(),
+            qemu_path: self.qemu_path.clone(),
+            ssh_key_path: self.ssh_key_path.clone(),
+            memory_mb: self.memory_mb,
+            cpus: self.cpus,
+            ssh_port_base: self.ssh_port_base,
+            max_instances: self.max_instances,
+            boot_timeout: std::time::Duration::from_secs(self.boot_timeout_secs),
+            ssh_user: "agent".to_string(),
+        }
+    }
 }
 
 impl Default for SandboxModeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            backend: "docker".to_string(),
             policy: "readonly".to_string(),
             timeout_secs: 120,
             memory_limit_mb: 2048,
@@ -33,6 +117,8 @@ impl Default for SandboxModeConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
+            #[cfg(feature = "stereos")]
+            stereos: StereOsModeConfig::default(),
         }
     }
 }
@@ -45,6 +131,7 @@ impl SandboxModeConfig {
 
         Ok(Self {
             enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
+            backend: parse_string_env("SANDBOX_BACKEND", "docker")?,
             policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
             timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
@@ -52,6 +139,8 @@ impl SandboxModeConfig {
             image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
+            #[cfg(feature = "stereos")]
+            stereos: StereOsModeConfig::resolve()?,
         })
     }
 

@@ -280,7 +280,43 @@ async fn main() -> anyhow::Result<()> {
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
             claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
         };
-        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+        let backend: Arc<dyn ironclaw::sandbox::SandboxBackend> =
+            match config.sandbox.backend.as_str() {
+                #[cfg(feature = "stereos")]
+                "stereos" => Arc::new(ironclaw::sandbox::stereos::StereOsRunner::new(
+                    config.sandbox.stereos.to_runner_config(),
+                )),
+                #[cfg(not(feature = "stereos"))]
+                "stereos" => {
+                    tracing::warn!(
+                        "SANDBOX_BACKEND=stereos requested but compiled without 'stereos' \
+                         feature; falling back to Docker"
+                    );
+                    Arc::new(ironclaw::sandbox::DockerBackend::new(
+                        config.sandbox.image.clone(),
+                        0,
+                    ))
+                }
+                "docker" => Arc::new(ironclaw::sandbox::DockerBackend::new(
+                    config.sandbox.image.clone(),
+                    0,
+                )),
+                other => {
+                    tracing::warn!(
+                        backend = other,
+                        "Unknown SANDBOX_BACKEND value, falling back to Docker"
+                    );
+                    Arc::new(ironclaw::sandbox::DockerBackend::new(
+                        config.sandbox.image.clone(),
+                        0,
+                    ))
+                }
+            };
+        let jm = Arc::new(ContainerJobManager::new(
+            job_config,
+            token_store.clone(),
+            backend,
+        ));
 
         // Start the orchestrator internal API in the background
         let orchestrator_state = OrchestratorState {
