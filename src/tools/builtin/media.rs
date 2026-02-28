@@ -21,15 +21,18 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolR
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Maximum file size allowed for image operations (50 MiB).
+#[cfg(feature = "media")]
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size allowed for PDF extraction (100 MiB).
+#[cfg(feature = "media")]
 const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Maximum file size allowed for audio transcription (25 MiB — Whisper API limit).
 const MAX_AUDIO_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Maximum characters returned from PDF extraction per call.
+#[cfg(feature = "media")]
 const MAX_PDF_OUTPUT_CHARS: usize = 128 * 1024;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -196,15 +199,17 @@ impl Tool for MediaInfoTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-
         #[cfg(not(feature = "media"))]
-        return Err(ToolError::ExecutionFailed(
-            "media feature is not enabled in this build".into(),
-        ));
+        {
+            let _ = &params;
+            return Err(ToolError::ExecutionFailed(
+                "media feature is not enabled in this build".into(),
+            ));
+        }
 
         #[cfg(feature = "media")]
         {
+            let start = Instant::now();
             let path_str = params
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -262,6 +267,7 @@ impl Tool for MediaInfoTool {
 /// both are applied as explicit targets (aspect ratio not preserved). When only one is
 /// set, the other is computed from the source aspect ratio. Max values cap even
 /// explicit caller-provided dimensions.
+#[cfg(feature = "media")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImageResizeConfig {
     /// Default target width when neither `width` nor `height` is given by the caller.
@@ -274,6 +280,7 @@ pub(crate) struct ImageResizeConfig {
     pub max_height: u32,
 }
 
+#[cfg(feature = "media")]
 impl Default for ImageResizeConfig {
     fn default() -> Self {
         Self {
@@ -288,6 +295,7 @@ impl Default for ImageResizeConfig {
 /// Read [`ImageResizeConfig`] from environment variables.
 ///
 /// Values of `0` and non-integer strings are silently ignored, preserving defaults.
+#[cfg(feature = "media")]
 pub(crate) fn image_resize_config() -> ImageResizeConfig {
     let parse = |var: &str| -> Option<u32> {
         std::env::var(var)
@@ -369,15 +377,17 @@ impl Tool for ImageResizeTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-
         #[cfg(not(feature = "media"))]
-        return Err(ToolError::ExecutionFailed(
-            "media feature is not enabled in this build".into(),
-        ));
+        {
+            let _ = &params;
+            return Err(ToolError::ExecutionFailed(
+                "media feature is not enabled in this build".into(),
+            ));
+        }
 
         #[cfg(feature = "media")]
         {
+            let start = Instant::now();
             use image::imageops::FilterType;
 
             let input_str = params
@@ -534,15 +544,17 @@ impl Tool for ImageConvertTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-
         #[cfg(not(feature = "media"))]
-        return Err(ToolError::ExecutionFailed(
-            "media feature is not enabled in this build".into(),
-        ));
+        {
+            let _ = &params;
+            return Err(ToolError::ExecutionFailed(
+                "media feature is not enabled in this build".into(),
+            ));
+        }
 
         #[cfg(feature = "media")]
         {
+            let start = Instant::now();
             let input_str = params
                 .get("input_path")
                 .and_then(|v| v.as_str())
@@ -661,15 +673,17 @@ impl Tool for PdfExtractTextTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-
         #[cfg(not(feature = "media"))]
-        return Err(ToolError::ExecutionFailed(
-            "media feature is not enabled in this build".into(),
-        ));
+        {
+            let _ = &params;
+            return Err(ToolError::ExecutionFailed(
+                "media feature is not enabled in this build".into(),
+            ));
+        }
 
         #[cfg(feature = "media")]
         {
+            let start = Instant::now();
             let path_str = params
                 .get("path")
                 .and_then(|v| v.as_str())

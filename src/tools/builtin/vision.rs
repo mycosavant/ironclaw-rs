@@ -31,9 +31,11 @@ use crate::tools::builtin::media::{detect_mime, resolve_safe_path, workspace_bas
 // ── Limits ───────────────────────────────────────────────────────────────────
 
 /// Maximum number of images per `image_analyze` call.
+#[cfg(feature = "media")]
 const MAX_IMAGES: usize = 10;
 
 /// Maximum bytes per image (20 MiB). Larger files are rejected before encoding.
+#[cfg(feature = "media")]
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 // ── Tool ─────────────────────────────────────────────────────────────────────

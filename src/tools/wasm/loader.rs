@@ -132,6 +132,17 @@ impl WasmToolLoader {
         let wasm_bytes = fs::read(wasm_path).await?;
 
         // Ed25519 signature verification (when signing keys are configured).
+        // When require_for_installed is true but no keys are loaded, reject
+        // rather than silently skipping verification.
+        if let Some(ref signing) = self.signing_config
+            && signing.is_empty()
+            && signing.require_for_installed
+        {
+            return Err(WasmLoadError::SignatureRequired {
+                name: name.to_string(),
+                reason: "signature required but no trusted keys configured".to_string(),
+            });
+        }
         if let Some(ref signing) = self.signing_config
             && !signing.is_empty()
         {
