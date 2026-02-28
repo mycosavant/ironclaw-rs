@@ -10,12 +10,13 @@ Include all relevant context from the conversation in the prompt you write.
 
 1. Formulate a specific, detailed prompt for the sub-agent based on the task
    requested. Include all necessary context from the conversation.
-2. Write that prompt to a temporary file at `/tmp/subagent-<tab-name>.md`.
+2. Write that prompt to a temporary file at `/dev/handoff/subagent-<tab-name>.md`.
 3. Determine a short, descriptive tab name (kebab-case, e.g., "review-safety",
    "trace-browser").
 4. Execute:
-   ```
-   tmux new-window -n "<tab-name>" "claude -p \"$(cat /tmp/subagent-<tab-name>.md)\"; echo ''; echo '--- Agent finished. Press Enter to close ---'; read"
+
+   ```bash
+   tmux new-window -n "<tab-name>" "claude -p \"$(cat /dev/handoff/subagent-<tab-name>.md)\"; echo ''; echo '--- Agent finished. Press Enter to close ---'; read"
    ```
 
 The trailing `read` keeps the pane open so the user can see the final output
