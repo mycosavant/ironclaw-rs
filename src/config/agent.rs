@@ -38,6 +38,8 @@ pub struct AgentConfig {
     pub agent_bus_capacity: usize,
     /// Maximum child agents a single job can spawn. Default: 5.
     pub max_child_agents: usize,
+    /// Maximum concurrent Playwright browser sessions. Default: 5.
+    pub browser_max_sessions: usize,
 }
 
 impl Default for AgentConfig {
@@ -60,6 +62,7 @@ impl Default for AgentConfig {
             cycle_window_size: 8,
             agent_bus_capacity: 256,
             max_child_agents: 5,
+            browser_max_sessions: 5,
         }
     }
 }
@@ -119,6 +122,10 @@ impl AgentConfig {
             max_child_agents: parse_optional_env(
                 "AGENT_MAX_CHILD_AGENTS",
                 settings.agent.max_child_agents,
+            )?,
+            browser_max_sessions: parse_optional_env(
+                "BROWSER_MAX_SESSIONS",
+                settings.agent.browser_max_sessions,
             )?,
         })
     }

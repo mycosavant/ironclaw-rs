@@ -351,7 +351,8 @@ impl AppBuilder {
             match crate::tools::builtin::browser::find_driver_script() {
                 Ok(driver_path) => {
                     let browser_mgr = Arc::new(
-                        crate::tools::builtin::browser::BrowserSessionManager::new(driver_path),
+                        crate::tools::builtin::browser::BrowserSessionManager::new(driver_path)
+                            .with_max_sessions(self.config.agent.browser_max_sessions),
                     );
                     tools.register_browser_tools(browser_mgr);
                 }
@@ -452,6 +453,7 @@ impl AppBuilder {
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
+            let signing_config = self.config.signing.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -459,6 +461,9 @@ impl AppBuilder {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
+                    }
+                    if !signing_config.is_empty() {
+                        loader = loader.with_signing_config(signing_config.clone());
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {
@@ -729,6 +734,9 @@ impl AppBuilder {
                 self.config.skills.local_dir.clone(),
                 self.config.skills.installed_dir.clone(),
             );
+            if !self.config.signing.is_empty() {
+                registry = registry.with_signing_config(self.config.signing.clone());
+            }
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));

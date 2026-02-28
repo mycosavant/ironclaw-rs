@@ -327,6 +327,10 @@ pub struct AgentSettings {
     /// Maximum child agents a single job can spawn. Default: 5.
     #[serde(default = "default_max_child_agents")]
     pub max_child_agents: usize,
+
+    /// Maximum concurrent browser sessions. Default: 5.
+    #[serde(default = "default_browser_max_sessions")]
+    pub browser_max_sessions: usize,
 }
 
 fn default_agent_name() -> String {
@@ -373,6 +377,10 @@ fn default_max_child_agents() -> usize {
     5
 }
 
+fn default_browser_max_sessions() -> usize {
+    5
+}
+
 fn default_true() -> bool {
     true
 }
@@ -394,6 +402,7 @@ impl Default for AgentSettings {
             cycle_window_size: default_cycle_window_size(),
             agent_bus_capacity: default_agent_bus_capacity(),
             max_child_agents: default_max_child_agents(),
+            browser_max_sessions: default_browser_max_sessions(),
         }
     }
 }

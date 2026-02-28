@@ -1062,6 +1062,7 @@ mod tests {
                 cycle_window_size: 10,
                 agent_bus_capacity: 256,
                 max_child_agents: 5,
+                browser_max_sessions: 5,
             },
             deps,
             Arc::new(ChannelManager::new()),

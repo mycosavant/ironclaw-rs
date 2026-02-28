@@ -984,6 +984,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reason_ctx: &mut ReasoningContext,
         plan: &ActionPlan,
     ) -> Result<(), Error> {
+        let mut cycle_guard =
+            crate::agent::cycle_guard::CycleGuard::new(self.deps.cycle_window_size);
+
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -1010,6 +1013,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 action.tool_name,
                 action.reasoning
             );
+
+            // SHA-256 cycle detection for planned actions
+            if cycle_guard.record_and_check_selections(&[(&action.tool_name, &action.parameters)]) {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    tool = %action.tool_name,
+                    "Cycle detected in plan execution, aborting remaining actions"
+                );
+                reason_ctx.messages.push(ChatMessage::system(
+                    "Plan execution was interrupted because a repeating tool-call pattern \
+                     was detected. Summarise what was accomplished and what remains.",
+                ));
+                break;
+            }
 
             // Execute the planned tool
             let result = self
