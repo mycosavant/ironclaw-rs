@@ -48,14 +48,17 @@ pub fn verify_chain(job_id: Uuid, actions: &[ActionRecord]) -> Result<(), ChainE
         };
 
         // Re-compute the expected content hash.
-        let canonical = format!(
-            "{}|{}|{}|{}|{}",
-            job_id,
-            action.sequence,
-            action.tool_name,
-            action.input,
-            action.executed_at.to_rfc3339(),
-        );
+        // Must match the canonical JSON format used by ActionRecord::seal().
+        let canonical = serde_json::json!({
+            "job_id": job_id.to_string(),
+            "sequence": action.sequence,
+            "tool_name": action.tool_name,
+            "input": action.input,
+            "success": action.success,
+            "output": action.output_sanitized,
+            "executed_at": action.executed_at.to_rfc3339(),
+        })
+        .to_string();
         let expected = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
 
         if *stored_hash != expected {

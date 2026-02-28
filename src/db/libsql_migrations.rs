@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS job_actions (
 
 CREATE INDEX IF NOT EXISTS idx_job_actions_job_id ON job_actions(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_actions_tool ON job_actions(tool_name);
+CREATE INDEX IF NOT EXISTS idx_job_actions_content_hash ON job_actions(content_hash);
 
 -- ==================== Dynamic Tools ====================
 

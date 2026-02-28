@@ -66,16 +66,24 @@ impl ActionRecord {
     /// Compute and set the content hash, linking to the previous action's hash.
     ///
     /// The canonical representation hashed is:
-    /// `job_id|sequence|tool_name|json(input)|executed_at_rfc3339`
+    /// `job_id|sequence|tool_name|json(input)|success|output_sanitized|executed_at_rfc3339`
+    ///
+    /// Including the output ensures the hash chain covers the full action record,
+    /// not just inputs — so a tampered output is detectable.
     pub fn seal(&mut self, job_id: Uuid, prev_hash: Option<&str>) {
-        let canonical = format!(
-            "{}|{}|{}|{}|{}",
-            job_id,
-            self.sequence,
-            self.tool_name,
-            self.input,
-            self.executed_at.to_rfc3339(),
-        );
+        // Use a JSON canonical format to avoid field-delimiter ambiguity.
+        // JSON escaping ensures `|` or other characters in field values cannot
+        // cause hash collisions across structurally different records.
+        let canonical = serde_json::json!({
+            "job_id": job_id.to_string(),
+            "sequence": self.sequence,
+            "tool_name": self.tool_name,
+            "input": self.input,
+            "success": self.success,
+            "output": self.output_sanitized,
+            "executed_at": self.executed_at.to_rfc3339(),
+        })
+        .to_string();
         let hash = blake3::hash(canonical.as_bytes());
         self.content_hash = Some(format!("blake3:{}", hash.to_hex()));
         self.prev_hash = prev_hash.map(String::from);
