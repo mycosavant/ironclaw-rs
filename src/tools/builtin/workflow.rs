@@ -1,10 +1,12 @@
 //! LLM-facing tools for managing workflows.
 //!
-//! Four tools let the agent manage workflows conversationally:
+//! Six tools let the agent manage workflows conversationally:
 //! - `workflow_create` - Create a new workflow definition
 //! - `workflow_run` - Start a workflow run (async, returns run ID)
 //! - `workflow_list` - List all workflows
 //! - `workflow_status` - Check status of a workflow run
+//! - `workflow_delete` - Delete a workflow definition
+//! - `workflow_update` - Update an existing workflow definition
 
 use std::sync::Arc;
 
@@ -129,7 +131,7 @@ impl Tool for WorkflowCreateTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false
+        true // Workflow steps contain prompt templates that will be executed later
     }
 }
 
@@ -308,7 +310,7 @@ impl Tool for WorkflowListTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false
+        true // echoes user-supplied workflow names and descriptions
     }
 }
 
@@ -395,6 +397,191 @@ impl Tool for WorkflowStatusTool {
     }
 
     fn requires_sanitization(&self) -> bool {
+        true // echoes user-supplied step IDs and error messages
+    }
+}
+
+// ==================== workflow_delete ====================
+
+pub struct WorkflowDeleteTool {
+    store: Arc<dyn Database>,
+}
+
+impl WorkflowDeleteTool {
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkflowDeleteTool {
+    fn name(&self) -> &str {
+        "workflow_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a workflow definition by name. This cannot be undone."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the workflow to delete"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        // Look up workflow by name + user_id to verify ownership
+        let workflow = self
+            .store
+            .get_workflow_by_name(&ctx.user_id, name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
+            .ok_or_else(|| ToolError::ExecutionFailed(format!("workflow '{name}' not found")))?;
+
+        let deleted =
+            self.store.delete_workflow(workflow.id).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to delete workflow: {e}"))
+            })?;
+
+        if !deleted {
+            return Err(ToolError::ExecutionFailed(format!(
+                "workflow '{name}' could not be deleted"
+            )));
+        }
+
+        let result = serde_json::json!({
+            "name": name,
+            "status": "deleted",
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
         false
+    }
+}
+
+// ==================== workflow_update ====================
+
+pub struct WorkflowUpdateTool {
+    store: Arc<dyn Database>,
+}
+
+impl WorkflowUpdateTool {
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkflowUpdateTool {
+    fn name(&self) -> &str {
+        "workflow_update"
+    }
+
+    fn description(&self) -> &str {
+        "Update an existing workflow definition. You can change the description, steps, \
+         or input_schema. The workflow is re-validated after modification."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the workflow to update"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New description (optional)"
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "New steps array (optional). Replaces the entire step list.",
+                    "items": { "type": "object" }
+                },
+                "input_schema": {
+                    "type": "object",
+                    "description": "New input schema (optional)"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        // Load existing workflow by name + user_id
+        let mut workflow = self
+            .store
+            .get_workflow_by_name(&ctx.user_id, name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
+            .ok_or_else(|| ToolError::ExecutionFailed(format!("workflow '{name}' not found")))?;
+
+        // Apply optional updates
+        if let Some(desc) = params.get("description").and_then(|v| v.as_str()) {
+            workflow.description = desc.to_string();
+        }
+
+        if let Some(steps_value) = params.get("steps") {
+            let steps: Vec<WorkflowStep> = serde_json::from_value(steps_value.clone())
+                .map_err(|e| ToolError::InvalidParameters(format!("invalid steps: {e}")))?;
+            workflow.steps = steps;
+        }
+
+        if let Some(schema) = params.get("input_schema") {
+            workflow.input_schema = schema.clone();
+        }
+
+        workflow.updated_at = Utc::now();
+
+        // Re-validate the modified workflow
+        validate_workflow(&workflow).map_err(|e| {
+            ToolError::InvalidParameters(format!("workflow validation failed: {e}"))
+        })?;
+
+        // Persist
+        self.store
+            .update_workflow(&workflow)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to update workflow: {e}")))?;
+
+        let result = serde_json::json!({
+            "id": workflow.id.to_string(),
+            "name": workflow.name,
+            "step_count": workflow.steps.len(),
+            "status": "updated",
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true // Updated steps may contain prompt templates that will be executed later
     }
 }

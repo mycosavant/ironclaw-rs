@@ -2,6 +2,7 @@
 //! parallel fan-out, conditional branching, loops, and template substitution.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 
@@ -14,12 +15,17 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::WorkflowError;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
+use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 
 /// Maximum nesting depth for condition evaluation to prevent stack overflow.
 const MAX_CONDITION_DEPTH: usize = 32;
 /// Maximum nesting depth for template value evaluation.
 const MAX_TEMPLATE_VALUE_DEPTH: usize = 64;
+/// Default workflow-level timeout (30 minutes).
+const DEFAULT_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Maximum nesting depth for step execution to prevent stack overflow.
+const MAX_STEP_EXECUTION_DEPTH: usize = 16;
 
 /// Executes workflow definitions step by step.
 pub struct WorkflowExecutor {
@@ -27,6 +33,8 @@ pub struct WorkflowExecutor {
     llm: Arc<dyn LlmProvider>,
     scheduler: Arc<Scheduler>,
     tools: Arc<ToolRegistry>,
+    safety: Option<Arc<SafetyLayer>>,
+    timeout: Duration,
 }
 
 impl WorkflowExecutor {
@@ -41,11 +49,51 @@ impl WorkflowExecutor {
             llm,
             scheduler,
             tools,
+            safety: None,
+            timeout: DEFAULT_WORKFLOW_TIMEOUT,
         }
     }
 
+    /// Set the safety layer for tool output scanning.
+    pub fn with_safety(mut self, safety: Arc<SafetyLayer>) -> Self {
+        self.safety = Some(safety);
+        self
+    }
+
+    /// Set a custom workflow-level timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Run a workflow to completion, updating the run record in the database.
+    ///
+    /// Wraps execution in a workflow-level timeout to prevent runaway runs.
     pub async fn run(
+        &self,
+        workflow: &Workflow,
+        run: &mut WorkflowRun,
+    ) -> Result<WorkflowOutput, WorkflowError> {
+        let timeout = self.timeout;
+        match tokio::time::timeout(timeout, self.run_inner(workflow, run)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                run.status = WorkflowRunStatus::Failed;
+                run.error = Some(format!(
+                    "workflow execution timed out after {}s",
+                    timeout.as_secs()
+                ));
+                run.completed_at = Some(Utc::now());
+                let _ = self.store.update_workflow_run(run).await;
+                Err(WorkflowError::Timeout {
+                    timeout_secs: timeout.as_secs(),
+                })
+            }
+        }
+    }
+
+    /// Inner run logic (without timeout wrapper).
+    async fn run_inner(
         &self,
         workflow: &Workflow,
         run: &mut WorkflowRun,
@@ -65,7 +113,7 @@ impl WorkflowExecutor {
             }
 
             match self
-                .execute_step(step, &mut run.outputs, &run.user_id)
+                .execute_step(step, &mut run.outputs, &run.user_id, 0)
                 .await
             {
                 Ok(()) => {}
@@ -96,9 +144,10 @@ impl WorkflowExecutor {
         step: &'a WorkflowStep,
         outputs: &'a mut WorkflowOutput,
         user_id: &'a str,
+        depth: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>>
     {
-        Box::pin(self.execute_step_inner(step, outputs, user_id))
+        Box::pin(self.execute_step_inner(step, outputs, user_id, depth))
     }
 
     async fn execute_step_inner(
@@ -106,7 +155,16 @@ impl WorkflowExecutor {
         step: &WorkflowStep,
         outputs: &mut WorkflowOutput,
         user_id: &str,
+        depth: usize,
     ) -> Result<(), WorkflowError> {
+        if depth >= MAX_STEP_EXECUTION_DEPTH {
+            return Err(WorkflowError::StepFailed {
+                step_id: step.id().to_string(),
+                reason: format!(
+                    "step execution nesting exceeds maximum depth of {MAX_STEP_EXECUTION_DEPTH}"
+                ),
+            });
+        }
         match step {
             WorkflowStep::Prompt {
                 id,
@@ -129,7 +187,12 @@ impl WorkflowExecutor {
                 outputs.insert(id.clone(), result);
             }
             WorkflowStep::Parallel { id, branches } => {
+                // NOTE: fail-fast semantics — if any branch errors, remaining branches
+                // are aborted (JoinSet is dropped). Side effects from completed branches
+                // (tool calls, dispatched jobs) are NOT rolled back. Callers should
+                // design workflows to tolerate partial parallel execution.
                 let mut set = tokio::task::JoinSet::new();
+                let next_depth = depth + 1;
                 for (branch_idx, branch) in branches.iter().enumerate() {
                     let branch = branch.clone();
                     let branch_outputs = outputs.clone();
@@ -138,13 +201,17 @@ impl WorkflowExecutor {
                     let llm = Arc::clone(&self.llm);
                     let scheduler = Arc::clone(&self.scheduler);
                     let tools = Arc::clone(&self.tools);
+                    let safety = self.safety.clone();
 
                     set.spawn(async move {
-                        let executor = WorkflowExecutor::new(store, llm, scheduler, tools);
+                        let mut executor = WorkflowExecutor::new(store, llm, scheduler, tools);
+                        if let Some(s) = safety {
+                            executor = executor.with_safety(s);
+                        }
                         let mut local_outputs = branch_outputs;
                         for step in &branch {
                             executor
-                                .execute_step(step, &mut local_outputs, &user_id)
+                                .execute_step(step, &mut local_outputs, &user_id, next_depth)
                                 .await?;
                         }
                         Ok::<(usize, WorkflowOutput), WorkflowError>((branch_idx, local_outputs))
@@ -192,7 +259,7 @@ impl WorkflowExecutor {
                     otherwise
                 };
                 for step in branch {
-                    self.execute_step(step, outputs, user_id).await?;
+                    self.execute_step(step, outputs, user_id, depth + 1).await?;
                 }
                 outputs.insert(id.clone(), serde_json::json!("condition_evaluated"));
             }
@@ -202,9 +269,12 @@ impl WorkflowExecutor {
                 exit_condition,
                 max_iterations,
             } => {
+                // Cycle detection relies on max_iterations rather than the SHA-256
+                // guard because the workflow executor uses a different execution
+                // path than the main agent loop.
                 for iteration in 0..*max_iterations {
                     for step in steps {
-                        self.execute_step(step, outputs, user_id).await?;
+                        self.execute_step(step, outputs, user_id, depth + 1).await?;
                     }
                     if evaluate_condition(exit_condition, outputs) {
                         outputs.insert(
@@ -245,6 +315,14 @@ impl WorkflowExecutor {
     }
 
     /// Execute a single LLM prompt and return the response text.
+    ///
+    /// NOTE: Prompt results are stored in `workflow_runs.outputs` but are NOT
+    /// individually recorded in the Merkle hash-chain audit trail. Only the
+    /// top-level `workflow_run` tool invocation gets an `ActionRecord`. This
+    /// is an accepted trade-off: per-step audit integration would require
+    /// passing a `ConversationMemory` through the executor, and the
+    /// `max_iterations` cap limits the blast radius.
+    // TODO: Full per-step audit trail integration (see M10 in production review).
     async fn execute_prompt(&self, prompt: &str, max_tokens: u32) -> Result<String, WorkflowError> {
         let messages = vec![ChatMessage::user(prompt)];
         let request = CompletionRequest::new(messages)
@@ -261,6 +339,14 @@ impl WorkflowExecutor {
     }
 
     /// Execute a tool by name with resolved parameters.
+    ///
+    /// NOTE: This routes directly through the `ToolRegistry`, bypassing the
+    /// SHA-256 cycle guard used in the main agent loop (`Worker`). Repeated
+    /// identical tool calls within a workflow loop rely on `max_iterations`
+    /// for termination rather than cycle detection. Per-step audit records
+    /// are not written here — only the top-level `workflow_run` invocation
+    /// is recorded in the Merkle hash-chain. See M9/M10 in the production
+    /// readiness audit for rationale.
     async fn execute_tool(
         &self,
         tool_name: &str,
@@ -281,6 +367,33 @@ impl WorkflowExecutor {
             .execute(params, &job_ctx)
             .await
             .map_err(|e| WorkflowError::ToolError(e.to_string()))?;
+
+        // Run safety layer on tool output when configured and the tool requires it
+        if let Some(ref safety) = self.safety
+            && tool.requires_sanitization()
+        {
+            let output_str = match &output.result {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let sanitized = safety.sanitize_tool_output(tool_name, &output_str);
+            if sanitized.was_modified {
+                // Distinguish hard-blocked output (safety policy / leak detection)
+                // from sanitized-but-allowed output (redaction, escaping).
+                if sanitized.content.starts_with("[Output blocked") {
+                    return Err(WorkflowError::SafetyBlocked {
+                        step_id: tool_name.to_string(),
+                        reason: sanitized.content.clone(),
+                    });
+                }
+                tracing::warn!(
+                    tool = tool_name,
+                    warnings = sanitized.warnings.len(),
+                    "SafetyLayer modified workflow tool output"
+                );
+                return Ok(serde_json::Value::String(sanitized.content));
+            }
+        }
 
         Ok(output.result)
     }

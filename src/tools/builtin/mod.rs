@@ -41,7 +41,10 @@ pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSea
 pub use time::TimeTool;
 #[cfg(feature = "media")]
 pub use vision::ImageAnalyzeTool;
-pub use workflow::{WorkflowCreateTool, WorkflowListTool, WorkflowRunTool, WorkflowStatusTool};
+pub use workflow::{
+    WorkflowCreateTool, WorkflowDeleteTool, WorkflowListTool, WorkflowRunTool, WorkflowStatusTool,
+    WorkflowUpdateTool,
+};
 
 #[cfg(feature = "browser")]
 pub use browser::{

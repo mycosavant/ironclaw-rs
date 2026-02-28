@@ -44,6 +44,11 @@ pub enum WorkflowStep {
         params: serde_json::Value,
     },
     /// Run branches in parallel, merge outputs.
+    ///
+    /// **Fail-fast semantics**: if any branch errors, remaining branches are aborted
+    /// (the `JoinSet` is dropped). Side effects from completed branches (tool calls,
+    /// dispatched jobs) are NOT rolled back. Callers should design workflows to
+    /// tolerate partial parallel execution.
     Parallel {
         id: String,
         branches: Vec<Vec<WorkflowStep>>,

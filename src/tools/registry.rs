@@ -77,6 +77,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "workflow_run",
     "workflow_list",
     "workflow_status",
+    "workflow_delete",
+    "workflow_update",
     "skill_list",
     "skill_search",
     "skill_install",
@@ -497,7 +499,8 @@ impl ToolRegistry {
         executor: Arc<crate::agent::workflow::WorkflowExecutor>,
     ) {
         use crate::tools::builtin::{
-            WorkflowCreateTool, WorkflowListTool, WorkflowRunTool, WorkflowStatusTool,
+            WorkflowCreateTool, WorkflowDeleteTool, WorkflowListTool, WorkflowRunTool,
+            WorkflowStatusTool, WorkflowUpdateTool,
         };
         self.register_sync(Arc::new(WorkflowCreateTool::new(Arc::clone(&store))));
         self.register_sync(Arc::new(WorkflowRunTool::new(
@@ -505,8 +508,10 @@ impl ToolRegistry {
             Arc::clone(&executor),
         )));
         self.register_sync(Arc::new(WorkflowListTool::new(Arc::clone(&store))));
-        self.register_sync(Arc::new(WorkflowStatusTool::new(store)));
-        tracing::info!("Registered 4 workflow management tools");
+        self.register_sync(Arc::new(WorkflowStatusTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(WorkflowDeleteTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(WorkflowUpdateTool::new(store)));
+        tracing::info!("Registered 6 workflow management tools");
     }
 
     /// Register browser automation tools (Playwright-backed).

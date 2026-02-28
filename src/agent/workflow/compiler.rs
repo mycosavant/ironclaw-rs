@@ -12,6 +12,17 @@ use std::collections::HashSet;
 use crate::agent::workflow::types::{ConditionExpr, Workflow, WorkflowStep};
 use crate::error::WorkflowError;
 
+/// Hard cap on loop max_iterations to prevent runaway execution.
+/// Individual loops may set a lower value, but never higher.
+pub const MAX_LOOP_ITERATIONS_CAP: u32 = 1000;
+
+/// Maximum number of branches allowed in a single Parallel step.
+const MAX_PARALLEL_BRANCHES: usize = 32;
+
+/// Maximum nesting depth for recursive compiler validation functions.
+/// Prevents stack overflow on pathologically nested workflow definitions.
+const MAX_STEP_NESTING_DEPTH: usize = 16;
+
 /// Validate a workflow definition before persisting or executing.
 pub fn validate_workflow(workflow: &Workflow) -> Result<(), WorkflowError> {
     if workflow.steps.is_empty() {
@@ -20,26 +31,36 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<(), WorkflowError> {
         });
     }
 
-    // Check for duplicate IDs
+    // Check for duplicate IDs and parallel branch limits
     let mut all_ids = HashSet::new();
-    collect_step_ids(&workflow.steps, &mut all_ids)?;
+    collect_step_ids(&workflow.steps, &mut all_ids, 0)?;
 
-    // Validate loop max_iterations > 0
-    validate_loop_iterations(&workflow.steps)?;
+    // Validate loop max_iterations > 0 and within cap
+    validate_loop_iterations(&workflow.steps, 0)?;
 
     // Check forward-only references for sequential steps
     let mut available_keys: HashSet<String> = HashSet::new();
     available_keys.insert("input".into());
-    validate_step_refs(&workflow.steps, &mut available_keys)?;
+    validate_step_refs(&workflow.steps, &mut available_keys, 0)?;
 
     Ok(())
 }
 
 /// Recursively collect all step IDs, erroring on duplicates.
+///
+/// Also validates parallel branch counts and enforces nesting depth limits.
 fn collect_step_ids(
     steps: &[WorkflowStep],
     seen: &mut HashSet<String>,
+    depth: usize,
 ) -> Result<(), WorkflowError> {
+    if depth >= MAX_STEP_NESTING_DEPTH {
+        return Err(WorkflowError::Validation {
+            reason: format!(
+                "workflow step nesting exceeds maximum depth of {MAX_STEP_NESTING_DEPTH}"
+            ),
+        });
+    }
     for step in steps {
         let id = step.id().to_string();
         if !seen.insert(id.clone()) {
@@ -48,19 +69,27 @@ fn collect_step_ids(
             });
         }
         match step {
-            WorkflowStep::Parallel { branches, .. } => {
+            WorkflowStep::Parallel { id, branches, .. } => {
+                if branches.len() > MAX_PARALLEL_BRANCHES {
+                    return Err(WorkflowError::Validation {
+                        reason: format!(
+                            "parallel step '{id}' has {} branches, exceeding the limit of {MAX_PARALLEL_BRANCHES}",
+                            branches.len()
+                        ),
+                    });
+                }
                 for branch in branches {
-                    collect_step_ids(branch, seen)?;
+                    collect_step_ids(branch, seen, depth + 1)?;
                 }
             }
             WorkflowStep::Condition {
                 then, otherwise, ..
             } => {
-                collect_step_ids(then, seen)?;
-                collect_step_ids(otherwise, seen)?;
+                collect_step_ids(then, seen, depth + 1)?;
+                collect_step_ids(otherwise, seen, depth + 1)?;
             }
             WorkflowStep::Loop { steps: inner, .. } => {
-                collect_step_ids(inner, seen)?;
+                collect_step_ids(inner, seen, depth + 1)?;
             }
             _ => {}
         }
@@ -68,8 +97,15 @@ fn collect_step_ids(
     Ok(())
 }
 
-/// Recursively check that all Loop steps have max_iterations > 0.
-fn validate_loop_iterations(steps: &[WorkflowStep]) -> Result<(), WorkflowError> {
+/// Recursively check that all Loop steps have max_iterations > 0 and within cap.
+fn validate_loop_iterations(steps: &[WorkflowStep], depth: usize) -> Result<(), WorkflowError> {
+    if depth >= MAX_STEP_NESTING_DEPTH {
+        return Err(WorkflowError::Validation {
+            reason: format!(
+                "workflow step nesting exceeds maximum depth of {MAX_STEP_NESTING_DEPTH}"
+            ),
+        });
+    }
     for step in steps {
         match step {
             WorkflowStep::Loop {
@@ -85,18 +121,26 @@ fn validate_loop_iterations(steps: &[WorkflowStep]) -> Result<(), WorkflowError>
                         ),
                     });
                 }
-                validate_loop_iterations(inner)?;
+                if *max_iterations > MAX_LOOP_ITERATIONS_CAP {
+                    return Err(WorkflowError::Validation {
+                        reason: format!(
+                            "loop step '{id}' has max_iterations={max_iterations}; \
+                             hard cap is {MAX_LOOP_ITERATIONS_CAP}"
+                        ),
+                    });
+                }
+                validate_loop_iterations(inner, depth + 1)?;
             }
             WorkflowStep::Parallel { branches, .. } => {
                 for branch in branches {
-                    validate_loop_iterations(branch)?;
+                    validate_loop_iterations(branch, depth + 1)?;
                 }
             }
             WorkflowStep::Condition {
                 then, otherwise, ..
             } => {
-                validate_loop_iterations(then)?;
-                validate_loop_iterations(otherwise)?;
+                validate_loop_iterations(then, depth + 1)?;
+                validate_loop_iterations(otherwise, depth + 1)?;
             }
             _ => {}
         }
@@ -108,7 +152,15 @@ fn validate_loop_iterations(steps: &[WorkflowStep]) -> Result<(), WorkflowError>
 fn validate_step_refs(
     steps: &[WorkflowStep],
     available: &mut HashSet<String>,
+    depth: usize,
 ) -> Result<(), WorkflowError> {
+    if depth >= MAX_STEP_NESTING_DEPTH {
+        return Err(WorkflowError::Validation {
+            reason: format!(
+                "workflow step nesting exceeds maximum depth of {MAX_STEP_NESTING_DEPTH}"
+            ),
+        });
+    }
     for step in steps {
         // Collect template refs from this step and check they're all available
         let refs = collect_template_refs_for_step(step);
@@ -130,7 +182,7 @@ fn validate_step_refs(
                 let mut branch_outputs = Vec::new();
                 for branch in branches {
                     let mut branch_available = available.clone();
-                    validate_step_refs(branch, &mut branch_available)?;
+                    validate_step_refs(branch, &mut branch_available, depth + 1)?;
                     // Collect new keys added by this branch
                     let new_keys: HashSet<String> =
                         branch_available.difference(available).cloned().collect();
@@ -146,9 +198,9 @@ fn validate_step_refs(
             } => {
                 // Both branches see the current available keys
                 let mut then_available = available.clone();
-                validate_step_refs(then, &mut then_available)?;
+                validate_step_refs(then, &mut then_available, depth + 1)?;
                 let mut else_available = available.clone();
-                validate_step_refs(otherwise, &mut else_available)?;
+                validate_step_refs(otherwise, &mut else_available, depth + 1)?;
                 // Only keys produced by both branches are guaranteed available after
                 let then_new: HashSet<String> =
                     then_available.difference(available).cloned().collect();
@@ -158,12 +210,9 @@ fn validate_step_refs(
                 available.extend(both);
             }
             WorkflowStep::Loop { steps: inner, .. } => {
-                // Validate the loop body as a sequential block. Each step within
-                // the body can reference steps defined *before* it in the body,
-                // which mirrors what actually happens at runtime (first iteration
-                // executes sequentially, subsequent iterations see prior outputs).
+                // Validate the loop body as a sequential block.
                 let mut loop_available = available.clone();
-                validate_step_refs(inner, &mut loop_available)?;
+                validate_step_refs(inner, &mut loop_available, depth + 1)?;
                 // Loop outputs are available after
                 available.extend(loop_available);
             }
@@ -400,5 +449,92 @@ mod tests {
         }]);
         let err = validate_workflow(&w).unwrap_err();
         assert!(err.to_string().contains("max_iterations=0"));
+    }
+
+    #[test]
+    fn test_parallel_branch_limit_exceeded() {
+        // Build a parallel step with 33 branches (exceeds MAX_PARALLEL_BRANCHES=32)
+        let branches: Vec<Vec<WorkflowStep>> = (0..33)
+            .map(|i| {
+                vec![WorkflowStep::Prompt {
+                    id: format!("b{i}"),
+                    prompt: "hi".into(),
+                    max_tokens: 1024,
+                }]
+            })
+            .collect();
+        let w = make_workflow(vec![WorkflowStep::Parallel {
+            id: "fan".into(),
+            branches,
+        }]);
+        let err = validate_workflow(&w).unwrap_err();
+        assert!(err.to_string().contains("exceeding the limit of 32"));
+    }
+
+    #[test]
+    fn test_parallel_branch_limit_at_boundary() {
+        // 32 branches should be accepted
+        let branches: Vec<Vec<WorkflowStep>> = (0..32)
+            .map(|i| {
+                vec![WorkflowStep::Prompt {
+                    id: format!("b{i}"),
+                    prompt: "hi".into(),
+                    max_tokens: 1024,
+                }]
+            })
+            .collect();
+        let w = make_workflow(vec![WorkflowStep::Parallel {
+            id: "fan".into(),
+            branches,
+        }]);
+        assert!(validate_workflow(&w).is_ok());
+    }
+
+    #[test]
+    fn test_nesting_depth_limit_exceeded() {
+        use crate::agent::workflow::types::ConditionExpr;
+        // Build a deeply nested workflow: Loop(Loop(Loop(...))) 17 levels deep
+        let mut inner = vec![WorkflowStep::Prompt {
+            id: "leaf".into(),
+            prompt: "hi".into(),
+            max_tokens: 1024,
+        }];
+        for i in (0..17).rev() {
+            inner = vec![WorkflowStep::Loop {
+                id: format!("loop{i}"),
+                steps: inner,
+                exit_condition: ConditionExpr::NotEmpty {
+                    key: "input".into(),
+                },
+                max_iterations: 1,
+            }];
+        }
+        let w = make_workflow(inner);
+        let err = validate_workflow(&w).unwrap_err();
+        assert!(err.to_string().contains("nesting exceeds maximum depth"));
+    }
+
+    #[test]
+    fn test_nesting_depth_at_boundary() {
+        use crate::agent::workflow::types::ConditionExpr;
+        // 15 loops wrapping a leaf prompt: deepest recursive call processes the
+        // leaf at depth 15, which is below MAX_STEP_NESTING_DEPTH (16). Should succeed.
+        let mut inner = vec![WorkflowStep::Prompt {
+            id: "leaf".into(),
+            prompt: "hi".into(),
+            max_tokens: 1024,
+        }];
+        for i in (0..15).rev() {
+            inner = vec![WorkflowStep::Loop {
+                id: format!("loop{i}"),
+                steps: inner,
+                exit_condition: ConditionExpr::NotEmpty {
+                    key: "input".into(),
+                },
+                max_iterations: 1,
+            }];
+        }
+        let w = make_workflow(inner);
+        assert!(validate_workflow(&w).is_ok());
     }
 }
