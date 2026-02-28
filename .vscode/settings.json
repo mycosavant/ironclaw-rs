@@ -4,7 +4,7 @@
     "cargo install": true
   },
   "workbench.colorTheme": "Experimental Dark",
-  "workbench.iconTheme": "a-file-icon-vscode",
+  "workbench.iconTheme": "vs-seti",
   "workbench.preferredDarkColorTheme": "Experimental Dark",
   "window.autoDetectColorScheme": false,
   "editor.semanticHighlighting.enabled": true,

@@ -21,3 +21,11 @@ bench-results/
 
 # user-specific config files
 .history
+dev/plans/HARDENING_SPRINT2_HANDOFF.md
+dev/plans/OPENFANG_production-readiness-review.md
+dev/plans/PRE_MERGE_REVIEW_HANDOFF.md
+dev/prompts/agent_review_implementation.md
+dev/NEXT_STEPS.md
+dev/review_agents_summary.md
+dev/review/FINDINGS.md
+dev/review/INVENTORY.md
