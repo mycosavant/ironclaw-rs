@@ -28,6 +28,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::context::JobContext;
+use crate::error::BrowserError;
 use crate::safety::{LeakDetectionError, LeakDetector};
 use crate::sandbox::proxy::allowlist::DomainAllowlist;
 use crate::tools::builtin::http::validate_url;
@@ -36,8 +37,49 @@ use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
 
+impl From<BrowserError> for ToolError {
+    fn from(e: BrowserError) -> Self {
+        match e {
+            BrowserError::SessionNotFound { .. } => ToolError::InvalidParameters(e.to_string()),
+            _ => ToolError::ExecutionFailed(e.to_string()),
+        }
+    }
+}
+
 /// Maximum output size before truncation (64 KB, matches shell tool).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+
+/// Maximum allowed CSS selector length.
+const MAX_SELECTOR_LENGTH: usize = 512;
+
+/// Validate a CSS selector string for safety.
+///
+/// Rejects:
+/// - Empty selectors
+/// - Selectors exceeding `MAX_SELECTOR_LENGTH`
+/// - XPath expressions (`//`, `xpath=`)
+/// - Playwright-specific dangerous pseudo-selectors
+fn validate_selector(selector: &str) -> Result<(), ToolError> {
+    if selector.is_empty() {
+        return Err(ToolError::InvalidParameters(
+            "selector cannot be empty".to_string(),
+        ));
+    }
+    if selector.len() > MAX_SELECTOR_LENGTH {
+        return Err(ToolError::InvalidParameters(format!(
+            "selector too long ({} chars, max {})",
+            selector.len(),
+            MAX_SELECTOR_LENGTH
+        )));
+    }
+    let lower = selector.to_lowercase();
+    if lower.starts_with("//") || lower.starts_with("xpath=") || lower.contains(">> internal:") {
+        return Err(ToolError::InvalidParameters(
+            "XPath and internal selectors are not allowed; use CSS selectors only".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Default browser session timeout (30 minutes).
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -65,7 +107,15 @@ pub(crate) struct BrowserSession {
     stdin: ChildStdin,
     /// Buffer for reading JSON responses from stdout.
     stdout: BufReader<ChildStdout>,
-    /// When the session was created.
+}
+
+/// Entry in the session map.
+///
+/// `created_at` lives outside the Mutex so `cleanup_stale` can check
+/// session age without acquiring the per-session lock, avoiding silent
+/// skips when a session is actively in use by a command.
+struct SessionEntry {
+    session: Arc<Mutex<BrowserSession>>,
     created_at: Instant,
 }
 
@@ -103,8 +153,12 @@ impl BrowserSession {
             Err(_) => Err(ToolError::Timeout(COMMAND_TIMEOUT)),
         }
     }
+}
 
+impl SessionEntry {
     /// Whether this session has exceeded its lifetime.
+    ///
+    /// Can be checked without acquiring the per-session Mutex.
     fn is_stale(&self) -> bool {
         self.created_at.elapsed() > SESSION_TIMEOUT
     }
@@ -119,7 +173,7 @@ impl BrowserSession {
 /// Each session is an independently lockable Playwright subprocess so that
 /// concurrent tool calls on different sessions do not block each other.
 pub struct BrowserSessionManager {
-    sessions: RwLock<HashMap<String, Arc<Mutex<BrowserSession>>>>,
+    sessions: RwLock<HashMap<String, SessionEntry>>,
     max_sessions: usize,
     url_allowlist: Option<DomainAllowlist>,
     driver_path: PathBuf,
@@ -161,6 +215,19 @@ impl BrowserSessionManager {
     pub async fn create_session(&self) -> Result<String, ToolError> {
         self.cleanup_stale().await;
 
+        // Fast pre-check under a read lock: reject early if already at capacity.
+        // This avoids spawning an expensive Chromium subprocess when obviously full.
+        // The authoritative check is under the write lock below (no TOCTOU gap).
+        {
+            let sessions = self.sessions.read().await;
+            if sessions.len() >= self.max_sessions {
+                return Err(BrowserError::SessionLimitReached {
+                    max: self.max_sessions,
+                }
+                .into());
+            }
+        }
+
         // Spawn the subprocess *before* acquiring the write lock so we don't
         // hold it across blocking I/O. If capacity is exceeded when we go to
         // insert, we kill the process and return an error.
@@ -177,18 +244,37 @@ impl BrowserSessionManager {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| {
-            ToolError::ExecutionFailed(format!(
-                "failed to launch browser (is node and playwright installed?): {e}"
-            ))
+        let mut child = cmd.spawn().map_err(|e| BrowserError::SubprocessError {
+            reason: format!("failed to launch browser (is node and playwright installed?): {e}"),
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ToolError::ExecutionFailed("failed to capture stdin for browser process".to_string())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ToolError::ExecutionFailed("failed to capture stdout for browser process".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| BrowserError::SubprocessError {
+                reason: "failed to capture stdin for browser process".to_string(),
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| BrowserError::SubprocessError {
+                reason: "failed to capture stdout for browser process".to_string(),
+            })?;
+
+        // Drain stderr asynchronously to prevent the subprocess from blocking
+        // when the stderr pipe buffer fills up (~64 KB on Linux). Without this,
+        // Chromium warnings/errors can block stdout writes, causing send_command
+        // to hang until COMMAND_TIMEOUT.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    tracing::debug!(target: "browser_driver_stderr", "{}", line.trim());
+                    line.clear();
+                }
+            });
+        }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let session = BrowserSession {
@@ -196,19 +282,24 @@ impl BrowserSessionManager {
             _child: child,
             stdin,
             stdout: BufReader::new(stdout),
-            created_at: Instant::now(),
         };
 
         // Single write lock for both capacity check and insert — no TOCTOU gap.
         let mut sessions = self.sessions.write().await;
         if sessions.len() >= self.max_sessions {
             // Session will be dropped here, and kill_on_drop will clean up.
-            return Err(ToolError::ExecutionFailed(format!(
-                "maximum browser sessions reached ({}); close an existing session first",
-                self.max_sessions,
-            )));
+            return Err(BrowserError::SessionLimitReached {
+                max: self.max_sessions,
+            }
+            .into());
         }
-        sessions.insert(session_id.clone(), Arc::new(Mutex::new(session)));
+        sessions.insert(
+            session_id.clone(),
+            SessionEntry {
+                session: Arc::new(Mutex::new(session)),
+                created_at: Instant::now(),
+            },
+        );
         drop(sessions);
 
         tracing::info!(session_id = %session_id, "created browser session");
@@ -220,18 +311,21 @@ impl BrowserSessionManager {
         &self,
         id: &str,
     ) -> Result<Arc<Mutex<BrowserSession>>, ToolError> {
-        self.sessions.read().await.get(id).cloned().ok_or_else(|| {
-            ToolError::InvalidParameters(format!("browser session '{id}' not found"))
-        })
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|e| e.session.clone())
+            .ok_or_else(|| BrowserError::SessionNotFound { id: id.to_string() }.into())
     }
 
     /// Close and remove a session, killing the subprocess.
     pub async fn close_session(&self, id: &str) -> Result<(), ToolError> {
-        let session_arc = self.sessions.write().await.remove(id).ok_or_else(|| {
+        let entry = self.sessions.write().await.remove(id).ok_or_else(|| {
             ToolError::InvalidParameters(format!("browser session '{id}' not found"))
         })?;
 
-        let mut session = session_arc.lock().await;
+        let mut session = entry.session.lock().await;
         // Try to send a graceful close command; ignore errors (process may already be dead).
         let _ = session
             .send_command(serde_json::json!({"action": "close"}))
@@ -243,21 +337,18 @@ impl BrowserSessionManager {
 
     /// Remove sessions that have exceeded their lifetime.
     ///
-    /// Two-phase approach: (1) identify stale IDs under read lock,
-    /// (2) remove them under write lock without awaiting across the lock.
-    /// Graceful close commands are sent after releasing the lock.
+    /// Two-phase approach: (1) identify stale IDs under read lock — no per-session
+    /// Mutex needed because `created_at` lives on `SessionEntry`, (2) remove them
+    /// under write lock. Graceful close commands are sent after releasing all locks.
     async fn cleanup_stale(&self) {
         // Phase 1: identify stale sessions under a read lock.
+        // `created_at` is on SessionEntry, so no per-session lock is needed.
         let stale_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
-                .filter_map(|(id, arc)| {
-                    arc.try_lock()
-                        .ok()
-                        .filter(|s| s.is_stale())
-                        .map(|_| id.clone())
-                })
+                .filter(|(_, entry)| entry.is_stale())
+                .map(|(id, _)| id.clone())
                 .collect()
         };
 
@@ -266,20 +357,31 @@ impl BrowserSessionManager {
         }
 
         // Phase 2: remove stale sessions under write lock (no .await here).
-        let removed: Vec<Arc<Mutex<BrowserSession>>> = {
+        let removed: Vec<(String, SessionEntry)> = {
             let mut sessions = self.sessions.write().await;
             stale_ids
-                .iter()
-                .filter_map(|id| sessions.remove(id))
+                .into_iter()
+                .filter_map(|id| sessions.remove(&id).map(|entry| (id, entry)))
                 .collect()
         };
 
-        // Phase 3: send graceful close commands without holding any lock.
-        for (arc, id) in removed.into_iter().zip(stale_ids.iter()) {
-            if let Ok(mut session) = arc.try_lock() {
-                let _ = session
-                    .send_command(serde_json::json!({"action": "close"}))
-                    .await;
+        // Phase 3: send graceful close commands without holding any map lock.
+        // Use a short timeout to avoid blocking session creation if an in-flight
+        // caller still holds the Mutex. The subprocess has kill_on_drop so the
+        // graceful close is a courtesy, not a correctness requirement.
+        for (id, entry) in &removed {
+            match tokio::time::timeout(Duration::from_secs(2), entry.session.lock()).await {
+                Ok(mut session) => {
+                    let _ = session
+                        .send_command(serde_json::json!({"action": "close"}))
+                        .await;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        session_id = %id,
+                        "stale session lock timed out, relying on kill_on_drop"
+                    );
+                }
             }
             tracing::info!(session_id = %id, "cleaned up stale browser session");
         }
@@ -473,9 +575,10 @@ impl Tool for BrowserNavigateTool {
         if let Some(allowlist) = self.session_manager.url_allowlist() {
             let host = parsed_url.host_str().unwrap_or("");
             if !allowlist.is_allowed(host).is_allowed() {
-                return Err(ToolError::NotAuthorized(format!(
-                    "domain '{host}' is not in the browser allowlist"
-                )));
+                return Err(BrowserError::SsrfBlocked {
+                    reason: format!("domain '{host}' is not in the browser allowlist"),
+                }
+                .into());
             }
         }
 
@@ -487,6 +590,7 @@ impl Tool for BrowserNavigateTool {
             "url": parsed_url.as_str(),
         });
         if let Some(wait_for) = params.get("wait_for").and_then(|v| v.as_str()) {
+            validate_selector(wait_for)?;
             cmd["wait_for"] = serde_json::json!(wait_for);
         }
 
@@ -565,6 +669,7 @@ impl Tool for BrowserClickTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let selector = require_str(&params, "selector")?;
+        validate_selector(selector)?;
         let (_session_id, handle) = get_required_session(&self.session_manager, &params).await?;
         let mut session = handle.lock().await;
 
@@ -649,6 +754,7 @@ impl Tool for BrowserTypeTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let selector = require_str(&params, "selector")?;
+        validate_selector(selector)?;
         let text = require_str(&params, "text")?;
 
         // Leak-scan the text being typed to catch credential injection.
@@ -753,6 +859,7 @@ impl Tool for BrowserScreenshotTool {
             "action": "screenshot",
         });
         if let Some(selector) = params.get("selector").and_then(|v| v.as_str()) {
+            validate_selector(selector)?;
             cmd["selector"] = serde_json::json!(selector);
         }
         if let Some(full_page) = params.get("full_page").and_then(|v| v.as_bool()) {
@@ -832,6 +939,7 @@ impl Tool for BrowserReadPageTool {
 
         let mut cmd = serde_json::json!({ "action": "read_page" });
         if let Some(selector) = params.get("selector").and_then(|v| v.as_str()) {
+            validate_selector(selector)?;
             cmd["selector"] = serde_json::json!(selector);
         }
 
@@ -845,9 +953,11 @@ impl Tool for BrowserReadPageTool {
             .scan_and_clean(page_text)
             .map_err(|e| match e {
                 LeakDetectionError::SecretLeakBlocked { pattern, preview } => {
-                    ToolError::NotAuthorized(format!(
-                        "page content contains potential secret ({pattern}): {preview}"
-                    ))
+                    ToolError::from(BrowserError::LeakDetected {
+                        reason: format!(
+                            "page content contains potential secret ({pattern}): {preview}"
+                        ),
+                    })
                 }
             })?;
 
@@ -1274,12 +1384,14 @@ mod tests {
                     .take()
                     .expect("stdout"),
             ),
-            created_at: Instant::now(),
         };
-        mgr.sessions
-            .write()
-            .await
-            .insert("fake-1".to_string(), Arc::new(Mutex::new(fake_session)));
+        mgr.sessions.write().await.insert(
+            "fake-1".to_string(),
+            SessionEntry {
+                session: Arc::new(Mutex::new(fake_session)),
+                created_at: Instant::now(),
+            },
+        );
 
         // Now attempt to create another session — should fail with limit error.
         // The spawn will fail (node not at /nonexistent), but if it somehow

@@ -465,6 +465,41 @@ pub enum WorkflowError {
 
     #[error("Workflow cancelled")]
     Cancelled,
+
+    #[error("Workflow execution timed out after {timeout_secs}s")]
+    Timeout { timeout_secs: u64 },
+
+    #[error("Safety policy blocked tool output in step '{step_id}': {reason}")]
+    SafetyBlocked { step_id: String, reason: String },
+}
+
+/// Browser automation errors.
+///
+/// Provides structured error variants so callers can distinguish between
+/// different failure modes (session not found, SSRF, subprocess crash, etc.)
+/// rather than collapsing everything to a generic string.
+#[derive(Debug, thiserror::Error)]
+pub enum BrowserError {
+    #[error("browser session '{id}' not found")]
+    SessionNotFound { id: String },
+
+    #[error("SSRF blocked: {reason}")]
+    SsrfBlocked { reason: String },
+
+    #[error("browser subprocess error: {reason}")]
+    SubprocessError { reason: String },
+
+    #[error("navigation timeout after {timeout_secs}s")]
+    NavigationTimeout { timeout_secs: u64 },
+
+    #[error("page content too large ({size} bytes, max {max_size})")]
+    ContentTooLarge { size: usize, max_size: usize },
+
+    #[error("maximum browser sessions reached ({max})")]
+    SessionLimitReached { max: usize },
+
+    #[error("secret detected in content: {reason}")]
+    LeakDetected { reason: String },
 }
 
 /// Result type alias for the agent.
