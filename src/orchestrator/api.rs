@@ -473,13 +473,22 @@ mod tests {
 
     use crate::orchestrator::auth::TokenStore;
     use crate::orchestrator::job_manager::{ContainerJobConfig, ContainerJobManager};
+    use crate::sandbox::DockerBackend;
     use crate::testing::StubLlm;
 
     use super::*;
 
+    fn test_backend() -> Arc<dyn crate::sandbox::SandboxBackend> {
+        Arc::new(DockerBackend::new("test:latest".to_string(), 0))
+    }
+
     fn test_state() -> OrchestratorState {
         let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let jm = ContainerJobManager::new(
+            ContainerJobConfig::default(),
+            token_store.clone(),
+            test_backend(),
+        );
         OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -699,7 +708,11 @@ mod tests {
             .unwrap();
 
         let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let jm = ContainerJobManager::new(
+            ContainerJobConfig::default(),
+            token_store.clone(),
+            test_backend(),
+        );
         let job_id = Uuid::new_v4();
         let token = token_store.create_token(job_id).await;
         token_store
@@ -746,7 +759,11 @@ mod tests {
     async fn job_event_broadcasts_message() {
         let (tx, mut rx) = broadcast::channel(16);
         let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let jm = ContainerJobManager::new(
+            ContainerJobConfig::default(),
+            token_store.clone(),
+            test_backend(),
+        );
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -801,7 +818,11 @@ mod tests {
     async fn job_event_handles_tool_use() {
         let (tx, mut rx) = broadcast::channel(16);
         let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let jm = ContainerJobManager::new(
+            ContainerJobConfig::default(),
+            token_store.clone(),
+            test_backend(),
+        );
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -849,7 +870,11 @@ mod tests {
     async fn job_event_handles_unknown_type() {
         let (tx, mut rx) = broadcast::channel(16);
         let token_store = TokenStore::new();
-        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let jm = ContainerJobManager::new(
+            ContainerJobConfig::default(),
+            token_store.clone(),
+            test_backend(),
+        );
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -904,6 +929,7 @@ mod tests {
                     container_id: "test-container".to_string(),
                     state: crate::orchestrator::job_manager::ContainerState::Running,
                     mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    backend: crate::sandbox::SandboxBackendKind::Docker,
                     created_at: chrono::Utc::now(),
                     project_dir: None,
                     task_description: "test".to_string(),

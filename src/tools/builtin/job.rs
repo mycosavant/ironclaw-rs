@@ -1791,6 +1791,10 @@ mod tests {
         let jm = Arc::new(ContainerJobManager::new(
             crate::orchestrator::job_manager::ContainerJobConfig::default(),
             crate::orchestrator::TokenStore::new(),
+            Arc::new(crate::sandbox::DockerBackend::new(
+                "test:latest".to_string(),
+                0,
+            )),
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
@@ -1807,6 +1811,10 @@ mod tests {
         let jm = Arc::new(ContainerJobManager::new(
             crate::orchestrator::job_manager::ContainerJobConfig::default(),
             crate::orchestrator::TokenStore::new(),
+            Arc::new(crate::sandbox::DockerBackend::new(
+                "test:latest".to_string(),
+                0,
+            )),
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();

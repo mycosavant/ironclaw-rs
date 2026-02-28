@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::sandbox::backend::{InstanceBind, SandboxBackend, SandboxBackendKind};
+use crate::sandbox::config::ResourceLimits;
 
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,7 @@ pub struct ContainerHandle {
     pub container_id: String,
     pub state: ContainerState,
     pub mode: JobMode,
+    pub backend: SandboxBackendKind,
     pub created_at: DateTime<Utc>,
     pub project_dir: Option<PathBuf>,
     pub task_description: String,
@@ -202,40 +204,27 @@ fn validate_bind_mount_path(
     Ok(canonical)
 }
 
-/// Manages the lifecycle of Docker containers for sandboxed job execution.
+/// Manages the lifecycle of sandbox instances for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
     token_store: TokenStore,
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
-    /// Cached Docker connection (created on first use).
-    docker: Arc<RwLock<Option<bollard::Docker>>>,
+    /// Sandbox backend for creating/starting/stopping instances.
+    backend: Arc<dyn SandboxBackend>,
 }
 
 impl ContainerJobManager {
-    pub fn new(config: ContainerJobConfig, token_store: TokenStore) -> Self {
+    pub fn new(
+        config: ContainerJobConfig,
+        token_store: TokenStore,
+        backend: Arc<dyn SandboxBackend>,
+    ) -> Self {
         Self {
             config,
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
-            docker: Arc::new(RwLock::new(None)),
+            backend,
         }
-    }
-
-    /// Get or create a Docker connection.
-    async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
-        {
-            let guard = self.docker.read().await;
-            if let Some(ref d) = *guard {
-                return Ok(d.clone());
-            }
-        }
-        let docker = connect_docker()
-            .await
-            .map_err(|e| OrchestratorError::Docker {
-                reason: e.to_string(),
-            })?;
-        *self.docker.write().await = Some(docker.clone());
-        Ok(docker)
     }
 
     /// Create and start a new container for a job.
@@ -266,6 +255,7 @@ impl ContainerJobManager {
             container_id: String::new(), // set after container creation
             state: ContainerState::Creating,
             mode,
+            backend: self.backend.kind(),
             created_at: Utc::now(),
             project_dir: project_dir.clone(),
             task_description: task.to_string(),
@@ -298,33 +288,32 @@ impl ContainerJobManager {
         project_dir: Option<PathBuf>,
         mode: JobMode,
     ) -> Result<(), OrchestratorError> {
-        // Connect to Docker (reuses cached connection)
-        let docker = self.docker().await?;
-
-        // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
-
+        let orchestrator_host = self.backend.orchestrator_host();
         let orchestrator_url = format!(
             "http://{}:{}",
             orchestrator_host, self.config.orchestrator_port
         );
 
-        let mut env_vec = vec![
-            format!("IRONCLAW_WORKER_TOKEN={}", token),
-            format!("IRONCLAW_JOB_ID={}", job_id),
-            format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
+        // Build environment variables
+        let mut env_pairs: Vec<(String, String)> = vec![
+            ("IRONCLAW_WORKER_TOKEN".to_string(), token.to_string()),
+            ("IRONCLAW_JOB_ID".to_string(), job_id.to_string()),
+            (
+                "IRONCLAW_ORCHESTRATOR_URL".to_string(),
+                orchestrator_url.clone(),
+            ),
         ];
 
-        // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
+        // Build bind mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
         if let Some(ref dir) = project_dir {
             let canonical = validate_bind_mount_path(dir, job_id)?;
-            binds.push(format!("{}:/workspace:rw", canonical.display()));
-            env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
+            binds.push(InstanceBind {
+                host_path: canonical.display().to_string(),
+                guest_path: "/workspace".to_string(),
+                writable: true,
+            });
+            env_pairs.push(("IRONCLAW_WORKSPACE".to_string(), "/workspace".to_string()));
         }
 
         // Claude Code mode: auth + tool allowlist.
@@ -335,14 +324,14 @@ impl ContainerJobManager {
         //      session, extracted from the host's credential store.
         if mode == JobMode::ClaudeCode {
             if let Some(ref api_key) = self.config.claude_code_api_key {
-                env_vec.push(format!("ANTHROPIC_API_KEY={}", api_key));
+                env_pairs.push(("ANTHROPIC_API_KEY".to_string(), api_key.clone()));
             } else if let Some(ref oauth_token) = self.config.claude_code_oauth_token {
-                env_vec.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", oauth_token));
+                env_pairs.push(("CLAUDE_CODE_OAUTH_TOKEN".to_string(), oauth_token.clone()));
             }
             if !self.config.claude_code_allowed_tools.is_empty() {
-                env_vec.push(format!(
-                    "CLAUDE_CODE_ALLOWED_TOOLS={}",
-                    self.config.claude_code_allowed_tools.join(",")
+                env_pairs.push((
+                    "CLAUDE_CODE_ALLOWED_TOOLS".to_string(),
+                    self.config.claude_code_allowed_tools.join(","),
                 ));
             }
         }
@@ -353,29 +342,15 @@ impl ContainerJobManager {
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
-        // Create the container
-        use bollard::container::{Config, CreateContainerOptions};
-        use bollard::models::HostConfig;
-
-        let host_config = HostConfig {
-            binds: if binds.is_empty() { None } else { Some(binds) },
-            memory: Some((memory_mb * 1024 * 1024) as i64),
-            cpu_shares: Some(self.config.cpu_shares as i64),
-            network_mode: Some("bridge".to_string()),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec!["CHOWN".to_string()]),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            tmpfs: Some(
-                [("/tmp".to_string(), "size=512M".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
+        let limits = ResourceLimits {
+            memory_bytes: memory_mb * 1024 * 1024,
+            cpu_shares: self.config.cpu_shares,
+            timeout: std::time::Duration::from_secs(3600), // 1 hour for long-running jobs
+            max_output_bytes: 64 * 1024,
         };
 
         // Build CMD based on mode
-        let cmd = match mode {
+        let entrypoint = match mode {
             JobMode::Worker => vec![
                 "worker".to_string(),
                 "--job-id".to_string(),
@@ -396,53 +371,35 @@ impl ContainerJobManager {
             ],
         };
 
-        let container_config = Config {
-            image: Some(self.config.image.clone()),
-            cmd: Some(cmd),
-            env: Some(env_vec),
-            host_config: Some(host_config),
-            user: Some("1000:1000".to_string()),
-            working_dir: Some("/workspace".to_string()),
-            ..Default::default()
-        };
-
-        let container_name = match mode {
-            JobMode::Worker => format!("ironclaw-worker-{}", job_id),
-            JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
-        };
-        let options = CreateContainerOptions {
-            name: container_name,
-            ..Default::default()
-        };
-
-        let response = docker
-            .create_container(Some(options), container_config)
+        // Delegate to the sandbox backend
+        let instance_id = self
+            .backend
+            .create_instance(job_id, entrypoint, env_pairs, binds, &limits)
             .await
             .map_err(|e| OrchestratorError::ContainerCreationFailed {
                 job_id,
                 reason: e.to_string(),
             })?;
 
-        let container_id = response.id;
-
-        // Start the container
-        docker
-            .start_container::<String>(&container_id, None)
+        // Start the instance
+        self.backend
+            .start_instance(&instance_id)
             .await
             .map_err(|e| OrchestratorError::ContainerCreationFailed {
                 job_id,
-                reason: format!("failed to start container: {}", e),
+                reason: format!("failed to start instance: {}", e),
             })?;
 
-        // Update handle with container ID
+        // Update handle with container/instance ID
         if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
-            handle.container_id = container_id;
+            handle.container_id = instance_id;
             handle.state = ContainerState::Running;
         }
 
         tracing::info!(
             job_id = %job_id,
-            "Created and started worker container"
+            backend = %self.backend.kind(),
+            "Created and started worker instance"
         );
 
         Ok(())
@@ -465,31 +422,13 @@ impl ContainerJobManager {
             });
         }
 
-        let docker = self.docker().await?;
-
-        // Stop the container (10 second grace period)
-        if let Err(e) = docker
-            .stop_container(
-                &container_id,
-                Some(bollard::container::StopContainerOptions { t: 10 }),
-            )
-            .await
-        {
-            tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container (may already be stopped)");
-        }
-
-        // Remove the container
-        if let Err(e) = docker
-            .remove_container(
-                &container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-        {
-            tracing::warn!(job_id = %job_id, error = %e, "Failed to remove container (may require manual cleanup)");
+        // Delegate stop to the backend
+        if let Err(e) = self.backend.stop_instance(&container_id).await {
+            tracing::warn!(
+                job_id = %job_id,
+                error = %e,
+                "Failed to stop instance (may already be stopped)"
+            );
         }
 
         // Update state
@@ -500,7 +439,7 @@ impl ContainerJobManager {
         // Revoke the auth token
         self.token_store.revoke(job_id).await;
 
-        tracing::info!(job_id = %job_id, "Stopped worker container");
+        tracing::info!(job_id = %job_id, "Stopped worker instance");
 
         Ok(())
     }
@@ -512,55 +451,33 @@ impl ContainerJobManager {
         job_id: Uuid,
         result: CompletionResult,
     ) -> Result<(), OrchestratorError> {
-        // Store the result before stopping
-        {
-            let mut containers = self.containers.write().await;
-            if let Some(handle) = containers.get_mut(&job_id) {
-                handle.completion_result = Some(result);
-                handle.state = ContainerState::Stopped;
-            }
-        }
-
-        // Stop container and revoke token (but keep handle in map)
+        // Extract container_id and update state under a single write lock
+        // to avoid TOCTOU races with concurrent cleanup_job calls.
         let container_id = {
-            let containers = self.containers.read().await;
-            containers.get(&job_id).map(|h| h.container_id.clone())
-        };
-        if let Some(cid) = container_id
-            && !cid.is_empty()
-        {
-            match self.docker().await {
-                Ok(docker) => {
-                    if let Err(e) = docker
-                        .stop_container(
-                            &cid,
-                            Some(bollard::container::StopContainerOptions { t: 5 }),
-                        )
-                        .await
-                    {
-                        tracing::warn!(job_id = %job_id, error = %e, "Failed to stop completed container");
-                    }
-                    if let Err(e) = docker
-                        .remove_container(
-                            &cid,
-                            Some(bollard::container::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                    {
-                        tracing::warn!(job_id = %job_id, error = %e, "Failed to remove completed container");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to Docker for container cleanup");
-                }
+            let mut containers = self.containers.write().await;
+            let handle = containers.get_mut(&job_id);
+            if let Some(h) = handle {
+                h.completion_result = Some(result);
+                h.state = ContainerState::Stopped;
+                h.container_id.clone()
+            } else {
+                String::new()
             }
+        };
+
+        // Stop instance via backend (but keep handle in map)
+        if !container_id.is_empty()
+            && let Err(e) = self.backend.stop_instance(&container_id).await
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                error = %e,
+                "Failed to stop completed instance"
+            );
         }
         self.token_store.revoke(job_id).await;
 
-        tracing::info!(job_id = %job_id, "Completed worker container");
+        tracing::info!(job_id = %job_id, "Completed worker instance");
         Ok(())
     }
 
@@ -596,11 +513,21 @@ impl ContainerJobManager {
     pub fn token_store(&self) -> &TokenStore {
         &self.token_store
     }
+
+    /// Get the backend kind.
+    pub fn backend_kind(&self) -> SandboxBackendKind {
+        self.backend.kind()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::docker::DockerBackend;
+
+    fn test_backend() -> Arc<dyn SandboxBackend> {
+        Arc::new(DockerBackend::new("test:latest".to_string(), 0))
+    }
 
     #[test]
     fn test_container_job_config_default() {
@@ -662,7 +589,8 @@ mod tests {
     #[tokio::test]
     async fn test_update_worker_status() {
         let store = TokenStore::new();
-        let mgr = ContainerJobManager::new(ContainerJobConfig::default(), store);
+        let backend = test_backend();
+        let mgr = ContainerJobManager::new(ContainerJobConfig::default(), store, backend);
         let job_id = Uuid::new_v4();
 
         // Insert a handle
@@ -675,6 +603,7 @@ mod tests {
                     container_id: "test".to_string(),
                     state: ContainerState::Running,
                     mode: JobMode::Worker,
+                    backend: SandboxBackendKind::Docker,
                     created_at: chrono::Utc::now(),
                     project_dir: None,
                     task_description: "test job".to_string(),

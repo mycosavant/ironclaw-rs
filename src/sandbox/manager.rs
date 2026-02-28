@@ -2,7 +2,7 @@
 //!
 //! The `SandboxManager` is the primary entry point for sandboxed execution.
 //! It coordinates:
-//! - Docker container creation and lifecycle
+//! - Backend-agnostic sandbox execution (Docker or stereOS)
 //! - HTTP proxy for network access control
 //! - Credential injection for API calls
 //! - Resource limits and timeouts
@@ -18,12 +18,12 @@
 //! │         ▼                                                                  │
 //! │   ┌──────────────┐     ┌──────────────┐     ┌──────────────────────────┐  │
 //! │   │ Start Proxy  │────▶│ Create       │────▶│ Execute & Collect Output │  │
-//! │   │ (if needed)  │     │ Container    │     │                          │  │
+//! │   │ (if needed)  │     │ Container/VM │     │                          │  │
 //! │   └──────────────┘     └──────────────┘     └──────────────────────────┘  │
 //! │                                                        │                   │
 //! │                                                        ▼                   │
 //! │                                              ┌──────────────────────────┐  │
-//! │                                              │ Cleanup Container        │  │
+//! │                                              │ Cleanup                  │  │
 //! │                                              └──────────────────────────┘  │
 //! └───────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -33,12 +33,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
-use bollard::Docker;
-
+use crate::sandbox::backend::SandboxBackend;
 use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
-use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
+use crate::sandbox::container::ContainerOutput;
+use crate::sandbox::docker::DockerBackend;
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
 
@@ -84,41 +84,45 @@ impl From<ContainerOutput> for ExecOutput {
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
-    docker: Arc<RwLock<Option<Docker>>>,
-    initialized: std::sync::atomic::AtomicBool,
+    backend: Arc<dyn SandboxBackend>,
+    /// Serializes concurrent `initialize()` calls and tracks init state.
+    init_state: Mutex<bool>,
 }
 
 impl SandboxManager {
-    /// Create a new sandbox manager.
-    pub fn new(config: SandboxConfig) -> Self {
+    /// Create a new sandbox manager with a specific backend.
+    pub fn new(config: SandboxConfig, backend: Arc<dyn SandboxBackend>) -> Self {
         Self {
             config,
             proxy: Arc::new(RwLock::new(None)),
-            docker: Arc::new(RwLock::new(None)),
-            initialized: std::sync::atomic::AtomicBool::new(false),
+            backend,
+            init_state: Mutex::new(false),
         }
     }
 
-    /// Create with default configuration.
+    /// Create with default configuration and Docker backend.
     pub fn with_defaults() -> Self {
-        Self::new(SandboxConfig::default())
+        let config = SandboxConfig::default();
+        let backend = Arc::new(DockerBackend::new(config.image.clone(), config.proxy_port));
+        Self::new(config, backend)
     }
 
-    /// Check if the sandbox is available (Docker running, etc.).
+    /// Check if the sandbox is available (backend running, etc.).
     pub async fn is_available(&self) -> bool {
         if !self.config.enabled {
             return false;
         }
 
-        match connect_docker().await {
-            Ok(docker) => docker.ping().await.is_ok(),
-            Err(_) => false,
-        }
+        self.backend.is_available().await
     }
 
-    /// Initialize the sandbox (connect to Docker, start proxy).
+    /// Initialize the sandbox (check backend, start proxy).
+    ///
+    /// Serialized via a mutex to prevent concurrent double-initialization
+    /// (e.g. two `execute_with_policy` calls racing to lazy-init).
     pub async fn initialize(&self) -> Result<()> {
-        if self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut initialized = self.init_state.lock().await;
+        if *initialized {
             return Ok(());
         }
 
@@ -128,26 +132,17 @@ impl SandboxManager {
             });
         }
 
-        // Connect to Docker
-        let docker = connect_docker().await?;
+        // Check if the backend runtime is available
+        if !self.backend.is_available().await {
+            return Err(SandboxError::DockerNotAvailable {
+                reason: format!("{} backend is not available", self.backend.kind()),
+            });
+        }
 
-        // Check if Docker is responsive
-        docker
-            .ping()
-            .await
-            .map_err(|e| SandboxError::DockerNotAvailable {
-                reason: e.to_string(),
-            })?;
-
-        // Check for / pull image using a temporary runner
-        let checker = ContainerRunner::new(
-            docker.clone(),
-            self.config.image.clone(),
-            self.config.proxy_port,
-        );
-        if !checker.image_exists().await {
+        // Check for / pull image
+        if !self.backend.image_exists().await {
             if self.config.auto_pull_image {
-                checker.pull_image().await?;
+                self.backend.pull_image().await?;
             } else {
                 return Err(SandboxError::ContainerCreationFailed {
                     reason: format!(
@@ -158,8 +153,6 @@ impl SandboxManager {
             }
         }
 
-        *self.docker.write().await = Some(docker);
-
         // Start the network proxy if we're using a sandboxed policy
         if self.config.policy.is_sandboxed() {
             let proxy = NetworkProxyBuilder::from_config(&self.config)
@@ -169,10 +162,9 @@ impl SandboxManager {
             *self.proxy.write().await = Some(proxy);
         }
 
-        self.initialized
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *initialized = true;
 
-        tracing::info!("Sandbox initialized");
+        tracing::info!(backend = %self.backend.kind(), "Sandbox initialized");
         Ok(())
     }
 
@@ -182,8 +174,7 @@ impl SandboxManager {
             proxy.stop().await;
         }
 
-        self.initialized
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.init_state.lock().await = false;
 
         tracing::info!("Sandbox shut down");
     }
@@ -212,28 +203,10 @@ impl SandboxManager {
             return self.execute_direct(command, cwd, env).await;
         }
 
-        // Ensure we're initialized
-        if !self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+        // Ensure we're initialized (lazy init on first use)
+        if !self.is_initialized().await {
             self.initialize().await?;
         }
-
-        // Get proxy port if running
-        let proxy_port = if let Some(proxy) = self.proxy.read().await.as_ref() {
-            proxy.addr().await.map(|a| a.port()).unwrap_or(0)
-        } else {
-            0
-        };
-
-        // Reuse the stored Docker connection, create a runner with the current proxy port
-        let docker =
-            self.docker
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| SandboxError::DockerNotAvailable {
-                    reason: "Docker connection not initialized".to_string(),
-                })?;
-        let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
 
         let limits = ResourceLimits {
             memory_bytes: self.config.memory_limit_mb * 1024 * 1024,
@@ -242,7 +215,10 @@ impl SandboxManager {
             max_output_bytes: 64 * 1024,
         };
 
-        let container_output = runner.execute(command, cwd, policy, &limits, env).await?;
+        let container_output = self
+            .backend
+            .execute(command, cwd, policy, &limits, env)
+            .await?;
 
         Ok(container_output.into())
     }
@@ -330,9 +306,14 @@ impl SandboxManager {
         &self.config
     }
 
+    /// Get a reference to the underlying backend.
+    pub fn backend(&self) -> &Arc<dyn SandboxBackend> {
+        &self.backend
+    }
+
     /// Check if the sandbox is initialized.
-    pub fn is_initialized(&self) -> bool {
-        self.initialized.load(std::sync::atomic::Ordering::SeqCst)
+    pub async fn is_initialized(&self) -> bool {
+        *self.init_state.lock().await
     }
 
     /// Get the proxy port if running.
@@ -347,8 +328,11 @@ impl SandboxManager {
 
 impl Drop for SandboxManager {
     fn drop(&mut self) {
-        // Note: async cleanup should be done via shutdown() before dropping
-        if self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+        // Note: async cleanup should be done via shutdown() before dropping.
+        // We can't await the lock in Drop, so use try_lock.
+        if let Ok(guard) = self.init_state.try_lock()
+            && *guard
+        {
             tracing::warn!("SandboxManager dropped without shutdown(), resources may leak");
         }
     }
@@ -357,6 +341,7 @@ impl Drop for SandboxManager {
 /// Builder for creating a sandbox manager.
 pub struct SandboxManagerBuilder {
     config: SandboxConfig,
+    backend: Option<Arc<dyn SandboxBackend>>,
 }
 
 impl SandboxManagerBuilder {
@@ -364,6 +349,7 @@ impl SandboxManagerBuilder {
     pub fn new() -> Self {
         Self {
             config: SandboxConfig::default(),
+            backend: None,
         }
     }
 
@@ -403,9 +389,21 @@ impl SandboxManagerBuilder {
         self
     }
 
+    /// Set a custom sandbox backend.
+    pub fn backend(mut self, backend: Arc<dyn SandboxBackend>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
     /// Build the sandbox manager.
     pub fn build(self) -> SandboxManager {
-        SandboxManager::new(self.config)
+        let backend = self.backend.unwrap_or_else(|| {
+            Arc::new(DockerBackend::new(
+                self.config.image.clone(),
+                self.config.proxy_port,
+            ))
+        });
+        SandboxManager::new(self.config, backend)
     }
 
     /// Build and initialize the sandbox manager.
@@ -482,11 +480,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_execution() {
-        let manager = SandboxManager::new(SandboxConfig {
+        let config = SandboxConfig {
             enabled: true,
             policy: SandboxPolicy::FullAccess,
             ..Default::default()
-        });
+        };
+        let backend = Arc::new(DockerBackend::new(config.image.clone(), config.proxy_port));
+        let manager = SandboxManager::new(config, backend);
 
         let result = manager
             .execute("echo hello", Path::new("."), HashMap::new())
@@ -500,11 +500,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_execution_truncates_large_output() {
-        let manager = SandboxManager::new(SandboxConfig {
+        let config = SandboxConfig {
             enabled: true,
             policy: SandboxPolicy::FullAccess,
             ..Default::default()
-        });
+        };
+        let backend = Arc::new(DockerBackend::new(config.image.clone(), config.proxy_port));
+        let manager = SandboxManager::new(config, backend);
 
         // Generate output larger than 32KB (half of 64KB limit)
         // printf repeats a 100-char line 400 times = 40KB
