@@ -1,23 +1,23 @@
-//! Error types for the Docker execution sandbox.
+//! Error types for the sandbox execution system (Docker + stereOS).
 
 use std::time::Duration;
 
 /// Errors that can occur in the sandbox system.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    /// Docker daemon is not available or not running.
+    /// Backend runtime (Docker, QEMU) is not available.
     #[error("Docker not available: {reason}")]
     DockerNotAvailable { reason: String },
 
-    /// Failed to create container.
+    /// Failed to create container or VM instance.
     #[error("Container creation failed: {reason}")]
     ContainerCreationFailed { reason: String },
 
-    /// Failed to start container.
+    /// Failed to start container or VM instance.
     #[error("Container start failed: {reason}")]
     ContainerStartFailed { reason: String },
 
-    /// Command execution failed inside container.
+    /// Command execution failed inside container or VM.
     #[error("Execution failed: {reason}")]
     ExecutionFailed { reason: String },
 
@@ -25,7 +25,7 @@ pub enum SandboxError {
     #[error("Command timed out after {0:?}")]
     Timeout(Duration),
 
-    /// Container resource limit exceeded.
+    /// Container/VM resource limit exceeded.
     #[error("Resource limit exceeded: {resource} limit of {limit}")]
     ResourceLimitExceeded { resource: String, limit: String },
 
@@ -52,6 +52,10 @@ pub enum SandboxError {
     /// Configuration error.
     #[error("Configuration error: {reason}")]
     Config { reason: String },
+
+    /// No VM/container slots available (max_instances or port range exhausted).
+    #[error("Capacity exhausted: {reason}")]
+    CapacityExhausted { reason: String },
 }
 
 /// Result type for sandbox operations.

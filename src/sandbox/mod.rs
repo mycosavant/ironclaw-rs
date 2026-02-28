@@ -85,14 +85,20 @@
 //! - **Auto-cleanup**: Containers are removed after execution (--rm + explicit cleanup)
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
+pub mod backend;
 pub mod config;
 pub mod container;
+pub mod docker;
 pub mod error;
 pub mod manager;
 pub mod proxy;
+#[cfg(feature = "stereos")]
+pub mod stereos;
 
+pub use backend::{InstanceBind, SandboxBackend, SandboxBackendKind};
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
+pub use docker::DockerBackend;
 pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
