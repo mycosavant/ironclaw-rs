@@ -541,7 +541,9 @@ async fn health_handler(State(state): State<Arc<GatewayState>>) -> Json<HealthRe
 async fn sse_ticket_handler(
     Extension(role): Extension<Role>,
     State(state): State<Arc<GatewayState>>,
-) -> Json<SseTicketResponse> {
+) -> Result<Json<SseTicketResponse>, (StatusCode, String)> {
+    require_permission(role, Permission::ViewChat)?;
+
     use rand::RngCore as _;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -559,10 +561,10 @@ async fn sse_ticket_handler(
         .await
         .insert(ticket.clone(), (std::time::Instant::now(), role));
 
-    Json(SseTicketResponse {
+    Ok(Json(SseTicketResponse {
         ticket,
         expires_in: SSE_TICKET_TTL_SECS,
-    })
+    }))
 }
 
 // --- Session handlers ---
@@ -988,15 +990,24 @@ async fn chat_ws_handler(
 
         match bearer {
             Some(token) => {
-                // Check if it's a session token (exists in the store).
-                let is_session = state.session_store.lock().await.contains_key(&token);
+                // Check if it's a session token (exists and not expired).
+                // validate_and_touch returns the role if valid, ensuring expired
+                // sessions aren't accidentally treated as active.
+                let is_session = crate::channels::web::session_store::validate_and_touch(
+                    &state.session_store,
+                    &token,
+                )
+                .await
+                .is_some();
                 if is_session {
                     WsAuthHandle::Session {
                         token,
                         store: state.session_store.clone(),
                     }
                 } else {
-                    // Master token or unknown → treat as permanently authenticated.
+                    // Reached here = auth middleware already verified the token
+                    // as either the master token (constant-time check) or via
+                    // trusted-proxy header. No session to revoke.
                     WsAuthHandle::MasterToken
                 }
             }
