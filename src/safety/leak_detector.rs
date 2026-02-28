@@ -144,9 +144,22 @@ impl LeakDetector {
 
     /// Create a detector with custom patterns.
     pub fn with_patterns(patterns: Vec<LeakPattern>) -> Self {
-        // Build prefix matcher for patterns that start with a known prefix
+        let mut detector = Self {
+            patterns,
+            prefix_matcher: None,
+            known_prefixes: Vec::new(),
+        };
+        detector.rebuild_prefix_matcher();
+        detector
+    }
+
+    /// Rebuild the Aho-Corasick prefix matcher from the current pattern set.
+    ///
+    /// Called from `with_patterns()` and `add_pattern()` so that dynamically
+    /// added patterns benefit from the fast-path prefix scan.
+    fn rebuild_prefix_matcher(&mut self) {
         let mut prefixes = Vec::new();
-        for (idx, pattern) in patterns.iter().enumerate() {
+        for (idx, pattern) in self.patterns.iter().enumerate() {
             if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
                 && prefix.len() >= 3
             {
@@ -154,7 +167,7 @@ impl LeakDetector {
             }
         }
 
-        let prefix_matcher = if !prefixes.is_empty() {
+        self.prefix_matcher = if !prefixes.is_empty() {
             let prefix_strings: Vec<&str> = prefixes.iter().map(|(s, _)| s.as_str()).collect();
             AhoCorasick::builder()
                 .ascii_case_insensitive(false)
@@ -164,11 +177,7 @@ impl LeakDetector {
             None
         };
 
-        Self {
-            patterns,
-            prefix_matcher,
-            known_prefixes: prefixes,
-        }
+        self.known_prefixes = prefixes;
     }
 
     /// Scan content for potential secret leaks.
@@ -317,9 +326,13 @@ impl LeakDetector {
     }
 
     /// Add a custom pattern at runtime.
+    ///
+    /// Rebuilds the Aho-Corasick prefix matcher so the new pattern benefits
+    /// from the fast-path scan. This is a cold-path operation (patterns are
+    /// added at startup, not per-request).
     pub fn add_pattern(&mut self, pattern: LeakPattern) {
         self.patterns.push(pattern);
-        // Note: prefix_matcher won't be updated; rebuild if needed
+        self.rebuild_prefix_matcher();
     }
 
     /// Get the number of patterns.
@@ -524,7 +537,7 @@ fn default_patterns() -> Vec<LeakPattern> {
 
 #[cfg(test)]
 mod tests {
-    use crate::safety::leak_detector::{LeakDetector, LeakSeverity};
+    use crate::safety::leak_detector::{LeakAction, LeakDetector, LeakPattern, LeakSeverity};
 
     #[test]
     fn test_detect_openai_key() {
@@ -703,6 +716,49 @@ mod tests {
         let body = b"{\"stolen\": \"sk-proj-test1234567890abcdefghij\"}";
         let result = detector.scan_http_request("https://api.example.com/webhook", &[], Some(body));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_pattern_increments_count() {
+        let mut detector = LeakDetector::new();
+        let before = detector.pattern_count();
+        detector.add_pattern(LeakPattern {
+            name: "custom_token".to_string(),
+            regex: regex::Regex::new(r"cust_tok_[a-zA-Z0-9]{20,}").unwrap(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Block,
+        });
+        assert_eq!(detector.pattern_count(), before + 1);
+    }
+
+    #[test]
+    fn test_add_pattern_rebuilds_prefix_matcher() {
+        let mut detector = LeakDetector::with_patterns(vec![]);
+        assert!(detector.prefix_matcher.is_none());
+        assert_eq!(detector.pattern_count(), 0);
+
+        // Add a pattern with a known literal prefix (>= 3 chars).
+        detector.add_pattern(LeakPattern {
+            name: "custom_prefix".to_string(),
+            regex: regex::Regex::new(r"myprefix_[a-zA-Z0-9]{10,}").unwrap(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Block,
+        });
+
+        // Prefix matcher should now be built.
+        assert!(detector.prefix_matcher.is_some());
+        assert_eq!(detector.known_prefixes.len(), 1);
+        assert_eq!(detector.known_prefixes[0].0, "myprefix_");
+
+        // Scanning content with the new prefix should detect it.
+        let result = detector.scan("secret: myprefix_abcdefghij1234567890");
+        assert!(!result.is_clean());
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "custom_prefix")
+        );
     }
 
     #[test]

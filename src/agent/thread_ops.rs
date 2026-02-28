@@ -161,6 +161,9 @@ impl Agent {
 
             if thread.injection_counter.is_quarantined() {
                 // Let the user exit quarantine with the exact command phrase.
+                // `content` is raw user input from the channel (human-typed),
+                // not LLM output. The trim-exact-match in try_exit() ensures
+                // only a dedicated "/unquarantine" message lifts quarantine.
                 if thread.injection_counter.try_exit(content) {
                     tracing::info!(thread_id = %thread_id, "Quarantine lifted by user");
                     return Ok(SubmissionResult::response(

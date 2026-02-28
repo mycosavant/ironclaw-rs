@@ -41,6 +41,7 @@ impl From<BrowserError> for ToolError {
     fn from(e: BrowserError) -> Self {
         match e {
             BrowserError::SessionNotFound { .. } => ToolError::InvalidParameters(e.to_string()),
+            BrowserError::SsrfBlocked { .. } => ToolError::NotAuthorized(e.to_string()),
             _ => ToolError::ExecutionFailed(e.to_string()),
         }
     }
@@ -563,15 +564,9 @@ impl Tool for BrowserNavigateTool {
         // SSRF defense: validate URL, resolve DNS, check for private IPs.
         let (parsed_url, _resolved_addrs) = validate_url(url_str).await?;
 
-        // Domain allowlist check.
-        //
-        // NOTE: This checks the *initial* URL only. If the page issues a
-        // server-side redirect (3xx) to a different domain, Playwright will
-        // follow it and the final destination is not re-checked against the
-        // allowlist. The JS driver operates over stdin/stdout and does not
-        // expose redirect events. For high-security deployments, combine
-        // with the Docker network proxy (sandbox/proxy) which intercepts
-        // all outbound connections at the network level.
+        // Domain allowlist check (initial URL).
+        // The final URL after redirects is re-checked below after the
+        // Playwright driver returns the actual page location.
         if let Some(allowlist) = self.session_manager.url_allowlist() {
             let host = parsed_url.host_str().unwrap_or("");
             if !allowlist.is_allowed(host).is_allowed() {
@@ -597,11 +592,62 @@ impl Tool for BrowserNavigateTool {
         let response = session.send_command(cmd).await?;
         let data = parse_driver_response(&response)?;
 
+        // SSRF defense: check the *final* URL after any server-side redirects.
+        // The Playwright driver returns `page.url()` which reflects the actual
+        // page location after following 3xx redirects. If the final URL differs
+        // from the requested URL, re-validate it to catch redirects to private
+        // IPs (e.g., a public site that 302s to http://169.254.169.254/).
+        let final_url = data.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        if !final_url.is_empty() && final_url != parsed_url.as_str() {
+            // Re-validate the final URL (DNS resolution + private IP check).
+            if let Err(e) = validate_url(final_url).await {
+                tracing::warn!(
+                    original = %parsed_url,
+                    final_url = %final_url,
+                    "browser redirect led to blocked URL: {e}"
+                );
+                // Close the session to prevent further interaction with the
+                // disallowed page.
+                drop(session);
+                let _ = self.session_manager.close_session(&session_id).await;
+                return Err(BrowserError::SsrfBlocked {
+                    reason: format!(
+                        "redirect from {} to {} was blocked: {e}",
+                        parsed_url, final_url,
+                    ),
+                }
+                .into());
+            }
+
+            // Also check the domain allowlist for the final URL.
+            if let Some(allowlist) = self.session_manager.url_allowlist()
+                && let Ok(final_parsed) = reqwest::Url::parse(final_url)
+            {
+                let final_host = final_parsed.host_str().unwrap_or("");
+                if !allowlist.is_allowed(final_host).is_allowed() {
+                    tracing::warn!(
+                        original = %parsed_url,
+                        final_url = %final_url,
+                        "browser redirect led to off-allowlist domain"
+                    );
+                    drop(session);
+                    let _ = self.session_manager.close_session(&session_id).await;
+                    return Err(BrowserError::SsrfBlocked {
+                        reason: format!(
+                            "redirect to domain '{}' is not in the browser allowlist",
+                            final_host,
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+
         Ok(ToolOutput::success(
             serde_json::json!({
                 "session_id": session_id,
                 "title": data.get("title").and_then(|t| t.as_str()).unwrap_or(""),
-                "url": data.get("url").and_then(|u| u.as_str()).unwrap_or(""),
+                "url": final_url,
             }),
             start.elapsed(),
         ))
@@ -1155,13 +1201,18 @@ mod tests {
                 .with_url_allowlist(DomainAllowlist::new(&["example.com".to_string()])),
         );
         let tool = BrowserNavigateTool::new(mgr);
+        // Use google.com which reliably resolves — the test verifies the
+        // allowlist rejects it (not on the list), not DNS behavior.
         let result = tool
             .execute(
-                serde_json::json!({"url": "https://evil.com/page"}),
+                serde_json::json!({"url": "https://google.com/page"}),
                 &dummy_ctx(),
             )
             .await;
-        assert!(matches!(result, Err(ToolError::NotAuthorized(_))));
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(_))),
+            "expected NotAuthorized for off-allowlist domain, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1410,6 +1461,61 @@ mod tests {
             Ok(_) => panic!("should not create session when at capacity"),
             Err(other) => panic!("unexpected error variant: {other}"),
         }
+    }
+
+    // ---- Selector validation tests ----
+
+    #[test]
+    fn test_validate_selector_rejects_empty() {
+        assert!(matches!(
+            validate_selector(""),
+            Err(ToolError::InvalidParameters(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_selector_rejects_too_long() {
+        let long = "a".repeat(MAX_SELECTOR_LENGTH + 1);
+        assert!(matches!(
+            validate_selector(&long),
+            Err(ToolError::InvalidParameters(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_selector_rejects_xpath() {
+        assert!(validate_selector("//div[@class='foo']").is_err());
+        assert!(validate_selector("xpath=//html").is_err());
+        assert!(validate_selector("XPATH=//html").is_err());
+    }
+
+    #[test]
+    fn test_validate_selector_rejects_internal() {
+        assert!(validate_selector("div >> internal:role=button").is_err());
+    }
+
+    #[test]
+    fn test_validate_selector_accepts_valid_css() {
+        assert!(validate_selector("#my-button").is_ok());
+        assert!(validate_selector(".container > div:nth-child(2)").is_ok());
+        assert!(validate_selector("input[type='text']").is_ok());
+    }
+
+    // ---- SSRF redirect defense tests ----
+
+    #[tokio::test]
+    async fn test_validate_url_rejects_redirect_to_metadata() {
+        // Simulates what happens when a redirect leads to the metadata endpoint.
+        // validate_url("https://169.254.169.254/") should fail because
+        // 169.254.169.254 is a link-local (disallowed) IP.
+        let result = validate_url("https://169.254.169.254/").await;
+        assert!(result.is_err(), "metadata endpoint IP should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_rejects_redirect_to_loopback() {
+        let result = validate_url("https://127.0.0.1/").await;
+        assert!(result.is_err(), "loopback IP should be blocked");
     }
 
     // ---- Domain test ----

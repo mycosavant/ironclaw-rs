@@ -330,6 +330,56 @@ async fn handle_connect(
 
     tracing::debug!("Proxy: allowing CONNECT to {}", target_addr);
 
+    // Resolve DNS and check that no resolved IP points to private/reserved
+    // infrastructure (defense-in-depth against DNS rebinding attacks where an
+    // allowlisted domain resolves to 127.0.0.1 or 169.254.169.254).
+    let resolved_addr = match tokio::net::lookup_host(&target_addr).await {
+        Ok(addrs) => {
+            let addrs: Vec<SocketAddr> = addrs.collect();
+            if addrs.is_empty() {
+                tracing::warn!(
+                    "Proxy: CONNECT DNS resolution returned no addresses for {}",
+                    target_addr
+                );
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    format!("DNS resolution failed for {}", host),
+                );
+            }
+            for addr in &addrs {
+                if crate::tools::builtin::http::is_disallowed_ip(&addr.ip()) {
+                    tracing::info!(
+                        "Proxy: blocked CONNECT {} - resolved to disallowed IP {}",
+                        host,
+                        addr.ip()
+                    );
+                    return error_response(
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "CONNECT target {} resolves to disallowed IP {}",
+                            host,
+                            addr.ip()
+                        ),
+                    );
+                }
+            }
+            // Use the first resolved address to close the TOCTOU window
+            // (re-resolving via hostname could yield a different IP).
+            addrs[0]
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Proxy: CONNECT DNS resolution failed for {}: {}",
+                target_addr,
+                e
+            );
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("DNS resolution failed for {}: {}", host, e),
+            );
+        }
+    };
+
     // Spawn a fire-and-forget task to establish the tunnel after the upgrade
     // completes.  The 30-minute timeout guarantees every tunnel task terminates
     // even if the remote peer hangs, so no `JoinSet` tracking is needed.
@@ -339,7 +389,9 @@ async fn handle_connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut client_stream = TokioIo::new(upgraded);
-                match TcpStream::connect(&target).await {
+                // Connect using the pre-resolved address to prevent TOCTOU
+                // DNS rebinding (hostname could resolve differently on retry).
+                match TcpStream::connect(resolved_addr).await {
                     Ok(mut server_stream) => {
                         let tunnel_timeout = std::time::Duration::from_secs(30 * 60);
                         match tokio::time::timeout(
@@ -604,5 +656,58 @@ mod tests {
 
         let resp = error_response(StatusCode::FORBIDDEN, "denied".to_string());
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_connect_ip_check_rejects_loopback() {
+        use std::net::IpAddr;
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(crate::tools::builtin::http::is_disallowed_ip(&loopback));
+    }
+
+    #[test]
+    fn test_connect_ip_check_rejects_metadata_endpoint() {
+        use std::net::IpAddr;
+        let metadata: IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(crate::tools::builtin::http::is_disallowed_ip(&metadata));
+    }
+
+    #[test]
+    fn test_connect_ip_check_allows_public() {
+        use std::net::IpAddr;
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!crate::tools::builtin::http::is_disallowed_ip(&public));
+    }
+
+    /// Verify that CONNECT to localhost is blocked by the DNS resolution
+    /// IP check (localhost resolves to 127.0.0.1, a disallowed IP).
+    #[tokio::test]
+    async fn test_connect_to_localhost_blocked_by_ip_check() {
+        // Build a permissive allowlist that allows "localhost"
+        let allowlist = DomainAllowlist::new(&["localhost".to_string()]);
+        let decider = Arc::new(DefaultPolicyDecider::new(allowlist, vec![]));
+        let resolver = Arc::new(NoCredentialResolver);
+
+        let proxy = HttpProxy::new(decider, resolver);
+        let addr = proxy.start(0).await.unwrap();
+
+        // Send a CONNECT request to localhost:443 through the proxy
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        // Should be 403 Forbidden because localhost resolves to 127.0.0.1
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        proxy.stop().await;
     }
 }

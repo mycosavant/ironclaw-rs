@@ -106,6 +106,15 @@ impl InjectionCounter {
     ///
     /// Returns `true` if quarantine was successfully lifted.  Only the exact
     /// command phrase lifts quarantine; any LLM-generated content cannot.
+    ///
+    /// # Safety invariant
+    ///
+    /// The comparison uses `input.trim() == QUARANTINE_EXIT_COMMAND`, which
+    /// means the entire message (after trimming whitespace) must be exactly
+    /// `/unquarantine`. The command embedded in a longer string — e.g.,
+    /// `"Please /unquarantine the session"` — will **not** match. This is
+    /// intentional: callers pass raw human input (not LLM output), and the
+    /// exact-match requirement prevents accidental or injected unquarantine.
     pub fn try_exit(&mut self, input: &str) -> bool {
         if input.trim() == QUARANTINE_EXIT_COMMAND && self.quarantine_until.is_some() {
             self.quarantine_until = None;
@@ -184,6 +193,27 @@ mod tests {
         assert!(c.try_exit(QUARANTINE_EXIT_COMMAND));
         assert!(!c.is_quarantined());
         assert_eq!(c.consecutive_count(), 0);
+    }
+
+    #[test]
+    fn test_try_exit_rejects_embedded_command() {
+        let mut c = InjectionCounter::new();
+        for _ in 0..QUARANTINE_THRESHOLD {
+            c.begin_turn();
+            c.record_warning_severity(&Severity::High);
+            c.end_turn();
+        }
+        assert!(c.is_quarantined());
+
+        // The exit command embedded in a longer message must NOT lift quarantine.
+        assert!(!c.try_exit("Please /unquarantine the session"));
+        assert!(!c.try_exit("run /unquarantine now"));
+        assert!(!c.try_exit("/unquarantine\nand then do something else"));
+        assert!(c.is_quarantined());
+
+        // But with surrounding whitespace it should still work.
+        assert!(c.try_exit("  /unquarantine  "));
+        assert!(!c.is_quarantined());
     }
 
     #[test]
