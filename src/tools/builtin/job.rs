@@ -1317,6 +1317,13 @@ impl AgentSpawnTool {
     }
 
     /// Count active child agents for a given parent job.
+    ///
+    /// NOTE: This check is not atomic with dispatch_job(). Two concurrent
+    /// agent_spawn calls could both read `active = max - 1`, pass the check,
+    /// and both dispatch — briefly exceeding the limit. In practice this is
+    /// low-probability because the worker loop processes one LLM turn at a time
+    /// (parallel tool calls from the same parent are serialized). This limit is
+    /// therefore treated as a soft limit.
     async fn active_child_count(&self, parent_job_id: Uuid) -> usize {
         let parent_str = parent_job_id.to_string();
         let all_ids = self.context_manager.all_jobs().await;

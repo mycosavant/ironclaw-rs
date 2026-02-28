@@ -63,13 +63,18 @@ pub async fn send_message(
     to_job_id: Uuid,
     message: AgentMessage,
 ) -> Result<(), String> {
-    let map = bus.read().await;
-    if let Some(tx) = map.get(&to_job_id) {
-        tx.send(message)
+    // Clone the sender out of the map before releasing the read lock,
+    // so we don't hold the RwLock across the async send().
+    let tx = {
+        let map = bus.read().await;
+        map.get(&to_job_id).cloned()
+    };
+    match tx {
+        Some(tx) => tx
+            .send(message)
             .await
-            .map_err(|_| format!("Job {} inbox closed", to_job_id))
-    } else {
-        Err(format!("Job {} not found in message bus", to_job_id))
+            .map_err(|_| format!("Job {} inbox closed", to_job_id)),
+        None => Err(format!("Job {} not found in message bus", to_job_id)),
     }
 }
 

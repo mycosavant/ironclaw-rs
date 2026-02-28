@@ -47,6 +47,7 @@ pub enum Permission {
     ViewSkills,
     ViewSettings,
     ViewRoutines,
+    ViewWorkflows,
     ViewChannels,
     ViewGatewayStatus,
 
@@ -55,6 +56,7 @@ pub enum Permission {
     ApproveToolCall,
     SubmitAuthToken,
     TriggerRoutine,
+    RunWorkflow,
 
     // Admin-level
     WriteMemory,
@@ -70,6 +72,8 @@ pub enum Permission {
     ToggleRoutine,
     ModifyRoutine,
     ChangeLogLevel,
+    CreateWorkflow,
+    ModifyWorkflow,
 
     // Owner-level
     ShutdownGateway,
@@ -91,13 +95,19 @@ impl Permission {
         use Permission::*;
         match self {
             ViewChat | ViewJobs | ViewMemory | ViewLogs | ViewExtensions | ViewSkills
-            | ViewSettings | ViewRoutines | ViewChannels | ViewGatewayStatus => Role::Viewer,
+            | ViewSettings | ViewRoutines | ViewWorkflows | ViewChannels | ViewGatewayStatus => {
+                Role::Viewer
+            }
 
-            SendMessage | ApproveToolCall | SubmitAuthToken | TriggerRoutine => Role::User,
+            SendMessage | ApproveToolCall | SubmitAuthToken | TriggerRoutine | RunWorkflow => {
+                Role::User
+            }
 
             WriteMemory | InstallExtension | RemoveExtension | ActivateExtension | InstallSkill
             | RemoveSkill | ModifySettings | ManageSessions | CancelJob | RestartJob
-            | ToggleRoutine | ModifyRoutine | ChangeLogLevel => Role::Admin,
+            | ToggleRoutine | ModifyRoutine | ChangeLogLevel | CreateWorkflow | ModifyWorkflow => {
+                Role::Admin
+            }
 
             ShutdownGateway | ManagePairing | ExportSettings | ImportSettings => Role::Owner,
         }
