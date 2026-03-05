@@ -74,6 +74,22 @@ impl Default for StereOsModeConfig {
 
 #[cfg(feature = "stereos")]
 impl StereOsModeConfig {
+    /// Resolve stereOS configuration from environment variables.
+    ///
+    /// All variables are optional and fall back to [`Default`] values:
+    ///
+    /// | Variable                  | Type       | Default                                    |
+    /// |---------------------------|------------|--------------------------------------------|
+    /// | `STEREOS_IMAGE_PATH`      | `PathBuf`  | `~/.ironclaw/stereos/stereos.qcow2`        |
+    /// | `STEREOS_QEMU_PATH`       | `PathBuf`  | auto-detect `qemu-system-{arch}`           |
+    /// | `STEREOS_SSH_KEY`          | `PathBuf`  | `~/.ironclaw/stereos/agent_key`            |
+    /// | `STEREOS_MEMORY_MB`       | `u64`      | `2048`                                     |
+    /// | `STEREOS_CPUS`            | `u32`      | `2`                                        |
+    /// | `STEREOS_SSH_PORT_BASE`   | `u16`      | `12200`                                    |
+    /// | `STEREOS_MAX_INSTANCES`   | `usize`    | `5`                                        |
+    /// | `STEREOS_BOOT_TIMEOUT`    | `u64` (s)  | `10`                                       |
+    /// | `STEREOS_PROXY_PORT`      | `u16`      | `0` (disabled)                             |
+    /// | `STEREOS_UEFI_FIRMWARE`   | `PathBuf`  | `None` (legacy BIOS)                       |
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
@@ -99,6 +115,10 @@ impl StereOsModeConfig {
     }
 
     /// Convert to the runtime config used by the stereOS runner.
+    ///
+    /// The SSH user is fixed to `"agent"` — the standard user in stereOS VM
+    /// images. This is not configurable because stereOS images always create
+    /// this user with the correct shell and permissions.
     pub fn to_runner_config(&self) -> crate::sandbox::stereos::runner::StereOsConfig {
         crate::sandbox::stereos::runner::StereOsConfig {
             image_path: self.image_path.clone(),

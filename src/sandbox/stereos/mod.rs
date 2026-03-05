@@ -5,7 +5,7 @@
 //! - Kernel-level separation (no shared kernel with host)
 //! - Restricted agent shell (`stereos-agent-shell`)
 //! - Immutable base image (QEMU `snapshot=on` for copy-on-write overlays)
-//! - ~3 second boot time
+//! - Fast boot (~3 s with KVM on a warm host; up to 10 s timeout without KVM)
 //!
 //! # Architecture
 //!

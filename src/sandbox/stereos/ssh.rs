@@ -46,6 +46,11 @@ impl SshClient {
     }
 
     /// Execute a command on the remote VM.
+    ///
+    /// `cmd` is passed verbatim to the remote shell — callers are responsible
+    /// for quoting (see [`shell_quote`](super::runner::shell_quote)).
+    /// Output is captured via `String::from_utf8_lossy`, so non-UTF-8 bytes
+    /// are replaced with U+FFFD.
     pub async fn exec(&self, cmd: &str, timeout: Duration) -> Result<SshOutput> {
         use tokio::process::Command;
 
@@ -141,6 +146,10 @@ impl SshClient {
     ///
     /// Uses a 5-second `ConnectTimeout` which is suitable for local QEMU VMs
     /// where SSH is available within milliseconds of the port being forwarded.
+    ///
+    /// `StrictHostKeyChecking` is disabled intentionally: stereOS VMs are
+    /// ephemeral (new key every boot via `snapshot=on`), so there is no stable
+    /// host identity to verify.
     fn base_args(&self) -> Vec<String> {
         vec![
             "-o".to_string(),

@@ -34,6 +34,14 @@ impl PortAllocator {
     }
 
     /// Allocate a free port, verifying it's actually bindable.
+    ///
+    /// Scans the range sequentially under a write lock. Each candidate port is
+    /// tested with a blocking `TcpListener::bind` (dispatched via
+    /// `spawn_blocking` to avoid stalling the tokio runtime). Port arithmetic
+    /// uses `checked_add` to guard against overflow near `u16::MAX`.
+    ///
+    /// There is a small TOCTOU window between the bind check and QEMU's actual
+    /// bind; in practice this is negligible on the loopback interface.
     pub async fn allocate(&self) -> Result<u16> {
         let mut used = self.used.write().await;
 

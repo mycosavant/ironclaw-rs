@@ -174,6 +174,10 @@ pub struct StereOsRunner {
 
 impl StereOsRunner {
     /// Create a new stereOS runner.
+    ///
+    /// Validates the SSH key path on construction and emits a `tracing::warn`
+    /// if the key is missing or has insecure permissions. Does not panic —
+    /// the key may be provisioned later by a setup script.
     pub fn new(config: StereOsConfig) -> Self {
         // Warn early if the SSH key is missing or has bad permissions.
         // Don't panic — the key may be provisioned later (e.g. by a setup script).
@@ -208,6 +212,11 @@ impl StereOsRunner {
     }
 
     /// Build the QEMU command for launching a VM.
+    ///
+    /// The returned [`Command`] includes KVM acceleration (if `/dev/kvm` exists),
+    /// UEFI firmware (if configured), and `snapshot=on` to ensure the base image
+    /// is never modified. QEMU's stdout/stderr/stdin are suppressed and
+    /// `kill_on_drop` is enabled so the process is cleaned up if the handle is dropped.
     fn build_qemu_command(&self, ssh_port: u16, memory_mb: u64, cpus: u32) -> Command {
         let qemu = self.qemu_binary();
         let mut cmd = Command::new(qemu);
@@ -292,7 +301,11 @@ impl StereOsRunner {
         ]
     }
 
-    /// Spawn a QEMU VM, wait for SSH, return the SSH port.
+    /// Spawn a QEMU VM, wait for SSH readiness, and return the child process
+    /// with its allocated SSH port.
+    ///
+    /// The allocated port is always released on failure (spawn error or boot
+    /// timeout), so callers only need to release the port on the success path.
     async fn spawn_vm(&self, memory_mb: u64, cpus: u32) -> Result<(Child, u16)> {
         let ssh_port = self.ports.allocate().await?;
 
@@ -332,8 +345,9 @@ impl SandboxBackend for StereOsRunner {
         SandboxBackendKind::StereOs
     }
 
+    /// Checks whether the QEMU binary (`qemu-system-{arch}`) is installed and
+    /// executable by running `--version`.
     async fn is_available(&self) -> bool {
-        // Check if QEMU binary exists and is executable
         let qemu = self.qemu_binary();
         tokio::process::Command::new(&qemu)
             .arg("--version")
@@ -345,14 +359,16 @@ impl SandboxBackend for StereOsRunner {
             .unwrap_or(false)
     }
 
+    /// Checks whether the stereOS VM image exists at `config.image_path`.
     async fn image_exists(&self) -> bool {
         tokio::fs::try_exists(&self.config.image_path)
             .await
             .unwrap_or(false)
     }
 
+    /// Always returns an error — stereOS images are built via Nix, not pulled
+    /// from a registry. The error message includes the `nix build` command.
     async fn pull_image(&self) -> Result<()> {
-        // stereOS images are built via Nix, not pulled.
         Err(SandboxError::Config {
             reason: format!(
                 "stereOS image not found at {}. Build with: nix build .#stereos-ironclaw",
@@ -361,6 +377,15 @@ impl SandboxBackend for StereOsRunner {
         })
     }
 
+    /// Execute a command in an ephemeral VM.
+    ///
+    /// Spawns a fresh QEMU instance, runs the command via SSH, collects output,
+    /// and tears down the VM. The VM is destroyed after every call regardless
+    /// of success or failure.
+    ///
+    /// Env keys are validated before the VM is spawned to avoid wasting a boot
+    /// cycle on invalid input. Proxy env vars are injected for sandboxed policies.
+    /// Output is truncated to `limits.max_output_bytes` using UTF-8-safe boundaries.
     async fn execute(
         &self,
         command: &str,
@@ -461,6 +486,17 @@ impl SandboxBackend for StereOsRunner {
         }
     }
 
+    /// Create a persistent VM instance for long-running jobs.
+    ///
+    /// Unlike `execute()`, the VM stays running after the entrypoint is launched
+    /// (via `nohup`) and must be explicitly stopped with `stop_instance()`.
+    ///
+    /// Uses a double-checked locking pattern for capacity: a read-lock pre-check
+    /// before the expensive VM boot, then a write-lock re-check before insertion
+    /// to handle races where another instance was created concurrently.
+    ///
+    /// Bind mounts are not supported by the QEMU backend; a warning is logged
+    /// if any are requested.
     async fn create_instance(
         &self,
         job_id: Uuid,
@@ -588,9 +624,9 @@ impl SandboxBackend for StereOsRunner {
         Ok(instance_id)
     }
 
+    /// No-op for stereOS — the VM and worker are already running after
+    /// `create_instance()`. Returns an error if the instance ID is not tracked.
     async fn start_instance(&self, instance_id: &str) -> Result<()> {
-        // For stereOS, the VM is already started in create_instance.
-        // This is a no-op (the worker binary was started via SSH).
         if !self.instances.read().await.contains_key(instance_id) {
             return Err(SandboxError::ExecutionFailed {
                 reason: format!("instance {} not found", instance_id),
@@ -599,12 +635,16 @@ impl SandboxBackend for StereOsRunner {
         Ok(())
     }
 
+    /// Stop a persistent VM instance by force-killing the QEMU process and
+    /// releasing its SSH port.
+    ///
+    /// Uses `kill()` rather than graceful shutdown (`sudo poweroff`) because
+    /// the agent user inside the VM has no sudo privileges. Idempotent — does
+    /// nothing if the instance ID is not tracked.
     async fn stop_instance(&self, instance_id: &str) -> Result<()> {
         let mut instances = self.instances.write().await;
 
         if let Some(mut instance) = instances.remove(instance_id) {
-            // Force-kill the QEMU process (the agent user has no sudo,
-            // so `sudo poweroff` would always fail; just kill directly).
             let _ = instance.process.kill().await;
 
             // Release the SSH port
@@ -616,8 +656,9 @@ impl SandboxBackend for StereOsRunner {
         Ok(())
     }
 
+    /// Returns `10.0.2.2` — the QEMU user-mode networking default gateway,
+    /// which is how the VM reaches the host's orchestrator API.
     fn orchestrator_host(&self) -> &str {
-        // QEMU user-mode networking default gateway
         "10.0.2.2"
     }
 }
